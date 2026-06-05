@@ -3,6 +3,13 @@
 use eframe::egui;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const WIN_W: f32 = 120.0;
+const WIN_H: f32 = 180.0;
+const TASKBAR_H: f32 = 50.0;
+const FEET_PAD: f32 = 40.0;
+const GRAVITY: f32 = 600.0;
+const WORK_WARN_SECS: f32 = 2.0 * 3600.0; // предупреждение через 2 часа
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -10,45 +17,130 @@ fn main() -> eframe::Result<()> {
             .with_transparent(true)
             .with_always_on_top()
             .with_resizable(false)
-            .with_inner_size([120.0, 180.0])
-            .with_position([100.0, 100.0]),
+            .with_inner_size([WIN_W, WIN_H])
+            .with_position([200.0, 810.0]),
         ..Default::default()
     };
-
-    eframe::run_native(
-        "mascot",
-        options,
-        Box::new(|_cc| Ok(Box::new(MascotApp::new()))),
-    )
+    eframe::run_native("mascot", options, Box::new(|_cc| Ok(Box::new(MascotApp::new()))))
 }
 
-const WIN_W: f32 = 120.0;
-const WIN_H: f32 = 180.0;
-const TASKBAR_H: f32 = 50.0;
-// пустое пространство ниже ног персонажа внутри окна
-const FEET_PAD: f32 = 40.0;
-const GRAVITY: f32 = 600.0;
+// ── Определяем активное окно (только Windows) ──────────────────────────────
+
+#[cfg(windows)]
+fn foreground_info() -> (String, String) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW,
+        PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
+    };
+    unsafe {
+        let hwnd = GetForegroundWindow();
+
+        let mut tbuf = [0u16; 512];
+        let tlen = GetWindowTextW(hwnd, &mut tbuf);
+        let title = String::from_utf16_lossy(&tbuf[..tlen as usize]).to_lowercase();
+
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .map(|h| {
+                let mut buf = [0u16; 260];
+                let mut sz = buf.len() as u32;
+                let _ = QueryFullProcessImageNameW(
+                    h,
+                    PROCESS_NAME_WIN32,
+                    windows::core::PWSTR(buf.as_mut_ptr()),
+                    &mut sz,
+                );
+                let _ = CloseHandle(h);
+                let path = String::from_utf16_lossy(&buf[..sz as usize]);
+                path.split(['/', '\\']).last().unwrap_or("").to_lowercase()
+            })
+            .unwrap_or_default();
+
+        (process, title)
+    }
+}
+
+#[cfg(not(windows))]
+fn foreground_info() -> (String, String) { (String::new(), String::new()) }
+
+// ── Активность ──────────────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy)]
-enum State {
-    Walking,
-    Idle,
-    Dragged,
-    Falling,
+enum Activity { Normal, Coding, Watching, Music }
+
+fn classify(process: &str, title: &str) -> Option<Activity> {
+    if process.is_empty() || process == "ai_agent.exe" { return None; }
+
+    // Claude Code desktop (Electron) — любой процесс с "claude" в имени
+    if process.contains("claude") { return Some(Activity::Coding); }
+
+    // IDE и редакторы
+    if process.contains("webstorm") || process.contains("rider")
+        || process.contains("clion")  || process.contains("idea")
+        || process == "code.exe"      || process == "zed.exe"
+        || process == "devenv.exe"    || process == "fleet.exe"
+        || process == "cursor.exe"    || process == "notepad.exe"
+        || process == "notepad++.exe" || process == "sublime_text.exe"
+    {
+        return Some(Activity::Coding);
+    }
+
+    // Claude Code / Codex / Cursor в терминале — смотрим заголовок окна
+    let is_terminal = process == "windowsterminal.exe"
+        || process == "cmd.exe"
+        || process == "powershell.exe"
+        || process == "pwsh.exe"
+        || process == "wt.exe"
+        || process == "alacritty.exe"
+        || process == "wezterm-gui.exe";
+
+    if is_terminal
+        && (title.contains("claude") || title.contains("codex") || title.contains("cursor"))
+    {
+        return Some(Activity::Coding);
+    }
+
+    if process == "spotify.exe" { return Some(Activity::Music); }
+
+    if (process == "chrome.exe" || process == "firefox.exe" || process == "msedge.exe")
+        && title.contains("youtube")
+    {
+        return Some(Activity::Watching);
+    }
+
+    Some(Activity::Normal)
 }
 
+// ── Состояния движения ───────────────────────────────────────────────────────
+
+#[derive(PartialEq, Clone, Copy)]
+enum State { Walking, Idle, Dragged, Falling }
+
+// ── Приложение ───────────────────────────────────────────────────────────────
+
 struct MascotApp {
-    pos: egui::Pos2,
-    target: egui::Pos2,
-    state: State,
-    state_before_drag: State,
-    idle_timer: f32,
-    vy: f32, // вертикальная скорость (для падения)
-    facing_left: bool,
-    walk_frame: f32,
-    hovered: bool,
-    rng: u64,
-    screen: egui::Vec2,
+    pos:          egui::Pos2,
+    target:       egui::Pos2,
+    state:        State,
+    idle_timer:   f32,
+    vy:           f32,
+    facing_left:  bool,
+    walk_frame:   f32,
+    hovered:      bool,
+    rng:          u64,
+    screen:       egui::Vec2,
+
+    activity:     Activity,
+    app_timer:    f32,              // интервал опроса активного окна
+    work_timer:   f32,              // сколько секунд кодим подряд
+    anim_timer:   f32,              // таймер анимации для поз
+    speech:       Option<(String, f32)>, // (текст, сколько ещё показывать)
 }
 
 impl MascotApp {
@@ -61,14 +153,18 @@ impl MascotApp {
             pos: egui::pos2(200.0, 810.0),
             target: egui::pos2(400.0, 810.0),
             state: State::Idle,
-            state_before_drag: State::Idle,
             idle_timer: 1.0,
+            vy: 0.0,
             facing_left: false,
             walk_frame: 0.0,
             hovered: false,
-            vy: 0.0,
             rng,
             screen: egui::vec2(1920.0, 1040.0),
+            activity: Activity::Normal,
+            app_timer: 0.0,
+            work_timer: 0.0,
+            anim_timer: 0.0,
+            speech: None,
         }
     }
 
@@ -76,198 +172,376 @@ impl MascotApp {
         self.rng = self.rng
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
-        // возвращаем float 0..1
         (self.rng >> 11) as f32 / (1u64 << 53) as f32
     }
 
     fn ground_y(&self) -> f32 {
-        // ноги персонажа касаются верха панели задач
-        // FEET_PAD — пустое место ниже ног в окне
         self.screen.y - TASKBAR_H - WIN_H + FEET_PAD
     }
 
     fn pick_target(&mut self) {
         let max_x = (self.screen.x - WIN_W).max(100.0);
-        // только по X, Y всегда = земля
         self.target = egui::pos2(self.rand() * max_x, self.ground_y());
     }
 
     fn clamp_pos(&self, p: egui::Pos2) -> egui::Pos2 {
-        let max_x = (self.screen.x - WIN_W).max(0.0);
-        // X ограничен экраном, Y всегда прижат к земле
-        egui::pos2(p.x.clamp(0.0, max_x), self.ground_y())
+        egui::pos2(p.x.clamp(0.0, (self.screen.x - WIN_W).max(0.0)), self.ground_y())
+    }
+
+    fn say(&mut self, text: &str, secs: f32) {
+        self.speech = Some((text.to_string(), secs));
     }
 }
 
-impl eframe::App for MascotApp {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+// ── Рисование ────────────────────────────────────────────────────────────────
+
+fn draw_mascot(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    state: State,
+    activity: Activity,
+    walk_frame: f32,
+    facing_left: bool,
+    anim: f32,
+) {
+    let flip: f32 = if facing_left { -1.0 } else { 1.0 };
+    let pi = std::f32::consts::PI;
+
+    let skin  = egui::Color32::from_rgb(255, 220, 200);
+    let hair  = egui::Color32::from_rgb(200, 200, 220);
+    let body  = egui::Color32::from_rgb(180, 140, 210);
+    let eye   = egui::Color32::from_rgb(70, 50, 110);
+
+    match activity {
+        // ── Обычная ходьба / стоит ────────────────────────────────────────
+        Activity::Normal => {
+            let bob = if state == State::Walking {
+                (walk_frame * pi).sin() * 3.0
+            } else { 0.0 };
+
+            let leg = if state == State::Walking {
+                (walk_frame * pi).sin() * 8.0
+            } else { 0.0 };
+            let arm = if state == State::Walking {
+                (walk_frame * pi).sin() * 10.0
+            } else { 0.0 };
+
+            // ноги
+            painter.line_segment(
+                [center + egui::vec2(-6.0, 20.0 + bob), center + egui::vec2(flip * (-6.0 + leg), 50.0 + bob)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.line_segment(
+                [center + egui::vec2(6.0, 20.0 + bob), center + egui::vec2(flip * (6.0 - leg), 50.0 + bob)],
+                egui::Stroke::new(5.0, body),
+            );
+            // тело
+            painter.circle_filled(center + egui::vec2(0.0, -10.0 + bob), 30.0, body);
+            // руки
+            painter.line_segment(
+                [center + egui::vec2(-28.0, -15.0 + bob), center + egui::vec2(-38.0, 5.0 + arm + bob)],
+                egui::Stroke::new(4.0, skin),
+            );
+            painter.line_segment(
+                [center + egui::vec2(28.0, -15.0 + bob), center + egui::vec2(38.0, 5.0 - arm + bob)],
+                egui::Stroke::new(4.0, skin),
+            );
+            // голова
+            painter.circle_filled(center + egui::vec2(0.0, -55.0 + bob), 25.0, skin);
+            painter.circle_filled(center + egui::vec2(0.0, -62.0 + bob), 22.0, hair);
+            let ex = flip * 3.0;
+            painter.circle_filled(center + egui::vec2(-7.0 + ex, -55.0 + bob), 3.5, eye);
+            painter.circle_filled(center + egui::vec2( 7.0 + ex, -55.0 + bob), 3.5, eye);
+        }
+
+        // ── Кодит — сидит с ноутом ────────────────────────────────────────
+        Activity::Coding => {
+            let blink = if (anim * 0.7).sin() > 0.96 { 1.0 } else { 3.5 };
+            let type_bob = (anim * 4.0).sin() * 1.5; // едва заметное покачивание при печати
+
+            // ноги (сидит — горизонтально)
+            painter.line_segment(
+                [center + egui::vec2(-8.0, 22.0), center + egui::vec2(-30.0, 30.0)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.line_segment(
+                [center + egui::vec2(8.0, 22.0), center + egui::vec2(30.0, 30.0)],
+                egui::Stroke::new(5.0, body),
+            );
+            // тело
+            painter.circle_filled(center + egui::vec2(0.0, -5.0 + type_bob), 28.0, body);
+            // ноутбук — прямоугольник
+            painter.rect_filled(
+                egui::Rect::from_center_size(center + egui::vec2(0.0, 28.0), egui::vec2(44.0, 24.0)),
+                3.0,
+                egui::Color32::from_rgb(60, 60, 80),
+            );
+            painter.rect_filled(
+                egui::Rect::from_center_size(center + egui::vec2(0.0, 27.0), egui::vec2(38.0, 16.0)),
+                2.0,
+                egui::Color32::from_rgb(100, 180, 255),
+            );
+            // руки на клавиатуре
+            painter.line_segment(
+                [center + egui::vec2(-20.0, 8.0 + type_bob), center + egui::vec2(-16.0, 28.0)],
+                egui::Stroke::new(4.0, skin),
+            );
+            painter.line_segment(
+                [center + egui::vec2(20.0, 8.0 + type_bob), center + egui::vec2(16.0, 28.0)],
+                egui::Stroke::new(4.0, skin),
+            );
+            // голова наклонена к экрану
+            painter.circle_filled(center + egui::vec2(flip * 3.0, -48.0 + type_bob), 25.0, skin);
+            painter.circle_filled(center + egui::vec2(flip * 3.0, -55.0 + type_bob), 22.0, hair);
+            painter.circle_filled(center + egui::vec2(-6.0 + flip * 3.0, -48.0 + type_bob), blink, eye);
+            painter.circle_filled(center + egui::vec2( 6.0 + flip * 3.0, -48.0 + type_bob), blink, eye);
+        }
+
+        // ── Смотрит YouTube — сидит и пялится ────────────────────────────
+        Activity::Watching => {
+            // ноги
+            painter.line_segment(
+                [center + egui::vec2(-8.0, 22.0), center + egui::vec2(-28.0, 32.0)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.line_segment(
+                [center + egui::vec2(8.0, 22.0), center + egui::vec2(28.0, 32.0)],
+                egui::Stroke::new(5.0, body),
+            );
+            // тело
+            painter.circle_filled(center + egui::vec2(0.0, -5.0), 28.0, body);
+            // руки опущены
+            painter.line_segment(
+                [center + egui::vec2(-26.0, -8.0), center + egui::vec2(-26.0, 12.0)],
+                egui::Stroke::new(4.0, skin),
+            );
+            painter.line_segment(
+                [center + egui::vec2(26.0, -8.0), center + egui::vec2(26.0, 12.0)],
+                egui::Stroke::new(4.0, skin),
+            );
+            // голова прямо, глаза широкие (смотрит вперёд)
+            painter.circle_filled(center + egui::vec2(0.0, -52.0), 25.0, skin);
+            painter.circle_filled(center + egui::vec2(0.0, -59.0), 22.0, hair);
+            // широкие глаза
+            painter.circle_filled(center + egui::vec2(-8.0, -52.0), 5.0, eye);
+            painter.circle_filled(center + egui::vec2( 8.0, -52.0), 5.0, eye);
+            painter.circle_filled(center + egui::vec2(-7.0, -51.0), 2.0, egui::Color32::WHITE);
+            painter.circle_filled(center + egui::vec2( 9.0, -51.0), 2.0, egui::Color32::WHITE);
+        }
+
+        // ── Музыка — танцует ──────────────────────────────────────────────
+        Activity::Music => {
+            let b = (anim * 4.0 * pi).sin();
+            let bob = b * 5.0;
+            let arm_l = (anim * 4.0 * pi).sin() * 20.0;
+            let arm_r = -(anim * 4.0 * pi).sin() * 20.0;
+
+            // ноги (подпрыгивает)
+            painter.line_segment(
+                [center + egui::vec2(-6.0, 22.0 + bob), center + egui::vec2(-10.0, 48.0 + bob)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.line_segment(
+                [center + egui::vec2(6.0, 22.0 + bob), center + egui::vec2(10.0, 48.0 + bob)],
+                egui::Stroke::new(5.0, body),
+            );
+            // тело
+            painter.circle_filled(center + egui::vec2(0.0, -10.0 + bob), 30.0, body);
+            // руки вверх
+            painter.line_segment(
+                [center + egui::vec2(-28.0, -15.0 + bob), center + egui::vec2(-42.0, -35.0 + arm_l + bob)],
+                egui::Stroke::new(4.0, skin),
+            );
+            painter.line_segment(
+                [center + egui::vec2(28.0, -15.0 + bob), center + egui::vec2(42.0, -35.0 + arm_r + bob)],
+                egui::Stroke::new(4.0, skin),
+            );
+            // голова
+            painter.circle_filled(center + egui::vec2(0.0, -55.0 + bob), 25.0, skin);
+            painter.circle_filled(center + egui::vec2(0.0, -62.0 + bob), 22.0, hair);
+            // улыбка (дуга)
+            painter.circle_filled(center + egui::vec2(-7.0, -55.0 + bob), 3.5, eye);
+            painter.circle_filled(center + egui::vec2( 7.0, -55.0 + bob), 3.5, eye);
+            // нотки
+            if b > 0.3 {
+                painter.text(
+                    center + egui::vec2(42.0, -50.0 + bob),
+                    egui::Align2::CENTER_CENTER,
+                    "♪",
+                    egui::FontId::proportional(14.0),
+                    egui::Color32::from_rgb(200, 150, 255),
+                );
+            }
+        }
     }
+}
+
+fn draw_speech(painter: &egui::Painter, center: egui::Pos2, text: &str) {
+    let pos = center + egui::vec2(0.0, -100.0);
+    let padding = egui::vec2(8.0, 6.0);
+    let font = egui::FontId::proportional(11.0);
+
+    // размер пузырька
+    let text_len = text.chars().count() as f32 * 6.5;
+    let w = text_len.max(60.0) + padding.x * 2.0;
+    let rect = egui::Rect::from_center_size(pos, egui::vec2(w, 24.0));
+
+    painter.rect_filled(rect, 6.0, egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230));
+    painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 140, 210)));
+
+    // хвостик пузырька
+    let tip = pos + egui::vec2(0.0, 16.0);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            tip,
+            tip + egui::vec2(-6.0, -8.0),
+            tip + egui::vec2(6.0, -8.0),
+        ],
+        egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230),
+        egui::Stroke::NONE,
+    ));
+
+    painter.text(pos, egui::Align2::CENTER_CENTER, text, font, egui::Color32::WHITE);
+}
+
+// ── App impl ──────────────────────────────────────────────────────────────────
+
+impl eframe::App for MascotApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] { [0.0; 4] }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let dt = ctx.input(|i| i.unstable_dt).min(0.05);
 
-        // обновляем размер экрана
+        // размер экрана
         if let Some(sz) = ctx.input(|i| i.viewport().monitor_size) {
-            if sz.x > 100.0 {
-                self.screen = sz;
+            if sz.x > 100.0 { self.screen = sz; }
+        }
+
+        // синхронизация позиции при перетаскивании
+        if self.state == State::Dragged {
+            if let Some(r) = ctx.input(|i| i.viewport().outer_rect) {
+                self.pos = r.min;
             }
         }
 
-        // ВАЖНО: синхронизируем self.pos с реальным положением окна каждый кадр
-        // Это ловит и ручное перетаскивание и подтверждает наши команды
-        if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-            if self.state == State::Dragged {
-                self.pos = outer.min;
+        // опрос активного окна каждые 2 секунды
+        self.app_timer -= dt;
+        if self.app_timer <= 0.0 {
+            self.app_timer = 2.0;
+            let (proc, title) = foreground_info();
+            if let Some(a) = classify(&proc, &title) {
+                self.activity = a;
             }
         }
 
+        // таймер работы
+        self.anim_timer += dt;
+        if self.activity == Activity::Coding {
+            self.work_timer += dt;
+            if self.work_timer >= WORK_WARN_SECS && self.speech.is_none() {
+                self.say("Ты уже 2 часа кодишь...\nМожет перерыв?", 6.0);
+                self.work_timer = 0.0;
+            }
+        } else {
+            self.work_timer = 0.0;
+        }
+
+        // пузырёк
+        if let Some((_, ref mut t)) = self.speech {
+            *t -= dt;
+        }
+        if self.speech.as_ref().map(|(_, t)| *t <= 0.0).unwrap_or(false) {
+            self.speech = None;
+        }
+
+        // движение (только не при перетаскивании и только в Normal)
+        if self.state != State::Dragged {
+            match self.state {
+                State::Walking if self.activity == Activity::Normal => {
+                    let speed = 80.0;
+                    let dir = self.target - self.pos;
+                    if dir.length() < 4.0 {
+                        self.state = State::Idle;
+                        self.idle_timer = 1.5 + self.rand() * 2.5;
+                        self.walk_frame = 0.0;
+                    } else {
+                        let step = dir.normalized() * speed * dt;
+                        self.pos += step;
+                        self.pos = self.clamp_pos(self.pos);
+                        self.facing_left = dir.x < 0.0;
+                        self.walk_frame += dt * 6.0;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
+                    }
+                }
+                // если не Normal — останавливаемся на месте
+                State::Walking => {
+                    self.state = State::Idle;
+                    self.idle_timer = 999.0; // ждём пока activity не вернётся в Normal
+                }
+                State::Idle => {
+                    if self.activity == Activity::Normal {
+                        self.idle_timer -= dt;
+                        if self.idle_timer <= 0.0 {
+                            self.pick_target();
+                            self.state = State::Walking;
+                        }
+                    }
+                }
+                State::Falling => {
+                    self.vy += GRAVITY * dt;
+                    self.pos.y += self.vy * dt;
+                    let g = self.ground_y();
+                    if self.pos.y >= g {
+                        self.pos.y = g;
+                        self.vy = 0.0;
+                        self.target = self.pos;
+                        self.state = State::Idle;
+                        self.idle_timer = 0.5;
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
+                }
+                _ => {}
+            }
+        }
+
+        // рисуем
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
                 let response = ui.allocate_rect(ui.max_rect(), egui::Sense::click_and_drag());
 
                 if response.drag_started() {
-                    self.state_before_drag = self.state;
                     self.state = State::Dragged;
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
-
                 if response.drag_stopped() {
-                    if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
-                        self.pos = outer.min;
+                    if let Some(r) = ctx.input(|i| i.viewport().outer_rect) {
+                        self.pos = egui::pos2(r.min.x, self.ground_y());
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
+                        self.target = self.pos;
                     }
                     self.vy = 0.0;
-                    self.state = State::Falling; // падаем вниз
+                    self.state = State::Falling;
                 }
-
                 if response.secondary_clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-
                 self.hovered = response.hovered();
 
-                // авто-движение только когда не тащим мышкой
-                if self.state != State::Dragged {
-                    match self.state {
-                        State::Walking => {
-                            let speed = 80.0;
-                            let dir = self.target - self.pos;
-                            let dist = dir.length();
+                let center = ui.max_rect().center();
+                let painter = ui.painter();
 
-                            if dist < 4.0 {
-                                self.state = State::Idle;
-                                self.idle_timer = 1.5 + self.rand() * 2.5;
-                                self.walk_frame = 0.0;
-                            } else {
-                                let step = dir.normalized() * speed * dt;
-                                self.pos += step;
-                                self.pos = self.clamp_pos(self.pos);
-                                self.facing_left = dir.x < 0.0;
-                                self.walk_frame += dt * 6.0;
-                                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
-                            }
-                        }
-                        State::Idle => {
-                            self.idle_timer -= dt;
-                            if self.idle_timer <= 0.0 {
-                                self.pick_target();
-                                self.state = State::Walking;
-                            }
-                        }
-                        State::Falling => {
-                            self.vy += GRAVITY * dt;
-                            self.pos.y += self.vy * dt;
-                            let ground = self.ground_y();
-                            if self.pos.y >= ground {
-                                self.pos.y = ground;
-                                self.vy = 0.0;
-                                self.target = self.pos;
-                                self.state = State::Idle;
-                                self.idle_timer = 0.5;
-                            }
-                            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
-                        }
-                        State::Dragged => {}
-                    }
+                draw_mascot(
+                    painter, center,
+                    self.state, self.activity,
+                    self.walk_frame, self.facing_left,
+                    self.anim_timer,
+                );
+
+                if let Some((ref text, _)) = self.speech {
+                    draw_speech(painter, center, text);
                 }
 
-                // рисуем персонажа
-                let rect = ui.max_rect();
-                let painter = ui.painter();
-                let center = rect.center();
-
-                let bob = if self.state == State::Walking {
-                    (self.walk_frame * std::f32::consts::PI).sin() * 3.0
-                } else {
-                    0.0
-                };
-                let flip: f32 = if self.facing_left { -1.0 } else { 1.0 };
-
-                // ноги
-                let leg = if self.state == State::Walking {
-                    (self.walk_frame * std::f32::consts::PI).sin() * 8.0
-                } else {
-                    0.0
-                };
-                painter.line_segment(
-                    [center + egui::vec2(-6.0, 20.0 + bob), center + egui::vec2(flip * (-6.0 + leg), 50.0 + bob)],
-                    egui::Stroke::new(5.0, egui::Color32::from_rgb(180, 140, 210)),
-                );
-                painter.line_segment(
-                    [center + egui::vec2(6.0, 20.0 + bob), center + egui::vec2(flip * (6.0 - leg), 50.0 + bob)],
-                    egui::Stroke::new(5.0, egui::Color32::from_rgb(180, 140, 210)),
-                );
-
-                // тело
-                painter.circle_filled(
-                    center + egui::vec2(0.0, -10.0 + bob),
-                    30.0,
-                    egui::Color32::from_rgb(180, 140, 210),
-                );
-
-                // руки
-                let arm = if self.state == State::Walking {
-                    (self.walk_frame * std::f32::consts::PI).sin() * 10.0
-                } else {
-                    0.0
-                };
-                painter.line_segment(
-                    [center + egui::vec2(-28.0, -15.0 + bob), center + egui::vec2(-38.0, 5.0 + arm + bob)],
-                    egui::Stroke::new(4.0, egui::Color32::from_rgb(255, 220, 200)),
-                );
-                painter.line_segment(
-                    [center + egui::vec2(28.0, -15.0 + bob), center + egui::vec2(38.0, 5.0 - arm + bob)],
-                    egui::Stroke::new(4.0, egui::Color32::from_rgb(255, 220, 200)),
-                );
-
-                // голова
-                painter.circle_filled(
-                    center + egui::vec2(0.0, -55.0 + bob),
-                    25.0,
-                    egui::Color32::from_rgb(255, 220, 200),
-                );
-                // волосы
-                painter.circle_filled(
-                    center + egui::vec2(0.0, -62.0 + bob),
-                    22.0,
-                    egui::Color32::from_rgb(200, 200, 220),
-                );
-
-                // глаза
-                let eye_x = flip * 3.0;
-                painter.circle_filled(
-                    center + egui::vec2(-7.0 + eye_x, -55.0 + bob),
-                    3.5,
-                    egui::Color32::from_rgb(70, 50, 110),
-                );
-                painter.circle_filled(
-                    center + egui::vec2(7.0 + eye_x, -55.0 + bob),
-                    3.5,
-                    egui::Color32::from_rgb(70, 50, 110),
-                );
-
-                // подсказка
                 if self.hovered {
                     let hp = center + egui::vec2(0.0, 72.0);
                     painter.rect_filled(
