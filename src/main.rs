@@ -8,7 +8,36 @@ const WIN_H: f32 = 220.0;
 const TASKBAR_H: f32 = 50.0;
 const FEET_PAD: f32 = 40.0;
 const GRAVITY: f32 = 600.0;
-const WORK_WARN_SECS: f32 = 2.0 * 3600.0; // предупреждение через 2 часа
+const WORK_WARN_SECS: f32 = 2.0 * 3600.0; // предупреждение через 2 часа кодинга
+const CHAOS_GRACE_SECS: f32 = 300.0;      // 5 минут после предупреждения до хаоса
+const JUMP_V: f32 = 720.0;          // сила прыжка за курсором
+const GRAB_RADIUS: f32 = 50.0;      // на каком расстоянии руки ловят курсор
+const FIGHT_THRESHOLD: f32 = 45.0;  // насколько дёрнуть курсор чтобы вырвать
+
+// ── Chaos: позиция курсора ────────────────────────────────────────────────────
+
+#[cfg(windows)]
+fn get_cursor_screen_pos() -> egui::Pos2 {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    unsafe {
+        let mut p = POINT::default();
+        let _ = GetCursorPos(&mut p);
+        egui::pos2(p.x as f32, p.y as f32)
+    }
+}
+
+#[cfg(not(windows))]
+fn get_cursor_screen_pos() -> egui::Pos2 { egui::Pos2::ZERO }
+
+#[cfg(windows)]
+fn set_cursor_screen_pos(x: f32, y: f32) {
+    use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
+    unsafe { let _ = SetCursorPos(x as i32, y as i32); }
+}
+
+#[cfg(not(windows))]
+fn set_cursor_screen_pos(_x: f32, _y: f32) {}
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -120,7 +149,7 @@ fn classify(process: &str, title: &str) -> Option<Activity> {
 // ── Состояния движения ───────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy)]
-enum State { Walking, Idle, Dragged, Falling }
+enum State { Walking, Idle, Dragged, Falling, ChaosChase, ChaosHold }
 
 // ── Приложение ───────────────────────────────────────────────────────────────
 
@@ -145,6 +174,15 @@ struct MascotApp {
     afk_warned:      bool,
     boredom_timer:   f32,
     last_mouse:      egui::Pos2,
+
+    chaos_armed:     bool,
+    chaos_timer:     f32,
+    chaos_mode:      bool,
+    last_set_cursor: Option<egui::Pos2>, // куда мы поставили курсор в прошлом кадре
+    chaos_target_x:  f32,                // куда бежим, когда держим курсор
+    chaos_vx:        f32,                // горизонтальная скорость в прыжке (баллистика)
+    chaos_catches:   u32,                // сколько раз поймала курсор
+    chaos_forgiving: bool,               // поймала 2й раз: держит, приземлится и простит
 }
 
 impl MascotApp {
@@ -173,6 +211,14 @@ impl MascotApp {
             afk_warned: false,
             boredom_timer: 600.0,
             last_mouse: egui::Pos2::ZERO,
+            chaos_armed: false,
+            chaos_timer: CHAOS_GRACE_SECS,
+            chaos_mode: false,
+            last_set_cursor: None,
+            chaos_target_x: 0.0,
+            chaos_vx: 0.0,
+            chaos_catches: 0,
+            chaos_forgiving: false,
         }
     }
 
@@ -194,6 +240,20 @@ impl MascotApp {
 
     fn clamp_pos(&self, p: egui::Pos2) -> egui::Pos2 {
         egui::pos2(p.x.clamp(0.0, (self.screen.x - WIN_W).max(0.0)), self.ground_y())
+    }
+
+    fn clamp_chaos_x(&self, x: f32) -> f32 {
+        x.clamp(0.0, (self.screen.x - WIN_W).max(0.0))
+    }
+
+    // точка где у персонажа "руки" — туда ловится/тащится курсор
+    fn grab_point(&self) -> egui::Pos2 {
+        self.pos + egui::vec2(WIN_W / 2.0, 35.0)
+    }
+
+    fn pick_chaos_target_x(&mut self) {
+        let max_x = (self.screen.x - WIN_W).max(100.0);
+        self.chaos_target_x = self.rand() * max_x;
     }
 
     fn say(&mut self, text: &str, secs: f32) {
@@ -218,6 +278,8 @@ fn draw_mascot(
     walk_frame: f32,
     facing_left: bool,
     anim: f32,
+    vy: f32,
+    on_ground: bool,
 ) {
     let flip: f32 = if facing_left { -1.0 } else { 1.0 };
     let pi = std::f32::consts::PI;
@@ -226,6 +288,130 @@ fn draw_mascot(
     let hair  = egui::Color32::from_rgb(200, 200, 220);
     let body  = egui::Color32::from_rgb(180, 140, 210);
     let eye   = egui::Color32::from_rgb(70, 50, 110);
+
+    // ── Хаос: бег / прыжок / потягивание / падение ────────────────────────
+    if state == State::ChaosChase || state == State::ChaosHold {
+        let ex = flip * 4.0;
+
+        // вспомогательная отрисовка головы + решительного лица
+        let draw_head = |dy: f32| {
+            painter.circle_filled(center + egui::vec2(flip * 4.0, -50.0 + dy), 24.0, skin);
+            painter.circle_filled(center + egui::vec2(flip * 4.0, -57.0 + dy), 21.0, hair);
+            painter.circle_filled(center + egui::vec2(-6.0 + ex, -50.0 + dy), 3.5, eye);
+            painter.circle_filled(center + egui::vec2( 6.0 + ex, -50.0 + dy), 3.5, eye);
+            painter.line_segment(
+                [center + egui::vec2(-11.0 + ex, -57.0 + dy), center + egui::vec2(-2.0 + ex, -54.0 + dy)],
+                egui::Stroke::new(2.0, eye),
+            );
+            painter.line_segment(
+                [center + egui::vec2(11.0 + ex, -57.0 + dy), center + egui::vec2(2.0 + ex, -54.0 + dy)],
+                egui::Stroke::new(2.0, eye),
+            );
+        };
+
+        if on_ground {
+            // ── БЕГ ──────────────────────────────────────────────────────
+            let s = (walk_frame * pi).sin();
+            let bob = s.abs() * 4.0;
+            let leg = s * 16.0;
+            painter.line_segment(
+                [center + egui::vec2(-5.0, 20.0 - bob), center + egui::vec2(flip * (-5.0 + leg), 52.0 - bob)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.line_segment(
+                [center + egui::vec2(5.0, 20.0 - bob), center + egui::vec2(flip * (5.0 - leg), 52.0 - bob)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.circle_filled(center + egui::vec2(flip * 4.0, -10.0 - bob), 30.0, body);
+            if state == State::ChaosHold {
+                // держит курсор — руки подняты вверх к курсору над головой
+                painter.line_segment(
+                    [center + egui::vec2(-18.0, -18.0 - bob), center + egui::vec2(-8.0, -72.0 - bob)],
+                    egui::Stroke::new(4.0, skin),
+                );
+                painter.line_segment(
+                    [center + egui::vec2(18.0, -18.0 - bob), center + egui::vec2(8.0, -72.0 - bob)],
+                    egui::Stroke::new(4.0, skin),
+                );
+            } else {
+                // гонится — руки качаются в беге
+                let arm = s * 12.0;
+                painter.line_segment(
+                    [center + egui::vec2(-26.0, -15.0 - bob), center + egui::vec2(flip * -34.0, 5.0 + arm - bob)],
+                    egui::Stroke::new(4.0, skin),
+                );
+                painter.line_segment(
+                    [center + egui::vec2(26.0, -15.0 - bob), center + egui::vec2(flip * 34.0, 5.0 - arm - bob)],
+                    egui::Stroke::new(4.0, skin),
+                );
+            }
+            draw_head(-bob);
+        } else if vy < -120.0 {
+            // ── ПРЫЖОК ВВЕРХ — ноги поджаты, руки замахиваются вверх ─────
+            painter.line_segment(
+                [center + egui::vec2(-6.0, 18.0), center + egui::vec2(-12.0, 40.0)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.line_segment(
+                [center + egui::vec2(6.0, 18.0), center + egui::vec2(12.0, 40.0)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.circle_filled(center + egui::vec2(0.0, -10.0), 30.0, body);
+            // руки вверх
+            painter.line_segment(
+                [center + egui::vec2(-22.0, -18.0), center + egui::vec2(-14.0, -58.0)],
+                egui::Stroke::new(4.0, skin),
+            );
+            painter.line_segment(
+                [center + egui::vec2(22.0, -18.0), center + egui::vec2(14.0, -58.0)],
+                egui::Stroke::new(4.0, skin),
+            );
+            draw_head(0.0);
+        } else if vy.abs() <= 120.0 {
+            // ── ВЕРШИНА — тянется к курсору, тело вытянуто ───────────────
+            painter.line_segment(
+                [center + egui::vec2(-5.0, 20.0), center + egui::vec2(-7.0, 50.0)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.line_segment(
+                [center + egui::vec2(5.0, 20.0), center + egui::vec2(7.0, 50.0)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.circle_filled(center + egui::vec2(0.0, -8.0), 29.0, body);
+            // руки вытянуты максимально вверх
+            painter.line_segment(
+                [center + egui::vec2(-18.0, -20.0), center + egui::vec2(-8.0, -78.0)],
+                egui::Stroke::new(4.0, skin),
+            );
+            painter.line_segment(
+                [center + egui::vec2(18.0, -20.0), center + egui::vec2(8.0, -78.0)],
+                egui::Stroke::new(4.0, skin),
+            );
+            draw_head(2.0);
+        } else {
+            // ── ПАДЕНИЕ — ноги болтаются вниз, руки держат вверху ────────
+            painter.line_segment(
+                [center + egui::vec2(-5.0, 20.0), center + egui::vec2(flip * -10.0, 56.0)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.line_segment(
+                [center + egui::vec2(5.0, 20.0), center + egui::vec2(flip * 12.0, 54.0)],
+                egui::Stroke::new(5.0, body),
+            );
+            painter.circle_filled(center + egui::vec2(0.0, -6.0), 30.0, body);
+            // руки вверх (держат курсор / схватились)
+            painter.line_segment(
+                [center + egui::vec2(-20.0, -16.0), center + egui::vec2(-10.0, -70.0)],
+                egui::Stroke::new(4.0, skin),
+            );
+            painter.line_segment(
+                [center + egui::vec2(20.0, -16.0), center + egui::vec2(10.0, -70.0)],
+                egui::Stroke::new(4.0, skin),
+            );
+            draw_head(4.0);
+        }
+        return;
+    }
 
     match activity {
         // ── Обычная ходьба / стоит ────────────────────────────────────────
@@ -498,16 +684,63 @@ impl eframe::App for MascotApp {
             }
         }
 
-        // таймер работы
+        // таймер работы + chaos
         self.anim_timer += dt;
         if self.activity == Activity::Coding {
             self.work_timer += dt;
-            if self.work_timer >= WORK_WARN_SECS && self.speech.is_none() {
-                self.say("Ты уже 2 часа кодишь...\nМожет перерыв?", 6.0);
+
+            // первое предупреждение — взводим таймер хаоса
+            if self.work_timer >= WORK_WARN_SECS && !self.chaos_armed {
+                self.say("2 часа уже. Встань.\nИли пожалеешь.", 8.0);
+                self.chaos_armed = true;
+                self.chaos_timer = CHAOS_GRACE_SECS;
                 self.work_timer = 0.0;
             }
+
+            // отсчёт до хаоса
+            if self.chaos_armed {
+                self.chaos_timer -= dt;
+                if self.chaos_timer <= 60.0 && self.chaos_timer > 59.0 {
+                    self.say("Последнее предупреждение.", 5.0);
+                }
+                if self.chaos_timer <= 0.0 && !self.chaos_mode {
+                    self.chaos_mode = true;
+                    self.chaos_catches = 0;
+                    self.chaos_forgiving = false;
+                    self.say("Сама предупреждала.", 4.0);
+                }
+            }
         } else {
+            // взял перерыв — снимаем хаос
+            if self.chaos_mode {
+                let p = self.choose(&["Наконец-то.", "Молодец.", "Давно бы так."]);
+                self.say(p, 4.0);
+            }
             self.work_timer = 0.0;
+            self.chaos_armed = false;
+            self.chaos_mode = false;
+            self.chaos_timer = CHAOS_GRACE_SECS;
+        }
+
+        // хаос — запускаем chase если ещё не в хаос-состоянии
+        if self.chaos_mode
+            && self.state != State::ChaosChase
+            && self.state != State::ChaosHold
+            && self.state != State::Dragged
+        {
+            self.state = State::ChaosChase;
+            self.vy = 0.0;
+        }
+        // хаос отключён — возвращаемся на землю
+        if !self.chaos_mode
+            && (self.state == State::ChaosChase || self.state == State::ChaosHold)
+        {
+            self.pos.y = self.ground_y();
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
+            self.state = State::Idle;
+            self.idle_timer = 1.0;
+            self.vy = 0.0;
+            self.last_set_cursor = None;
         }
 
         // AFK — мышь не двигается
@@ -645,15 +878,149 @@ impl eframe::App for MascotApp {
                         self.target = self.pos;
                         self.state = State::Idle;
                         self.idle_timer = 0.5;
-                        let p = self.choose(&[
-                            "Ладно.",
-                            "Поставил.",
-                            "И зачем это было?",
-                            "Уф.",
-                        ]);
-                        self.say(p, 2.0);
+                        // не перебиваем уже активную реплику (напр. "Прощаю")
+                        if self.speech.is_none() {
+                            let p = self.choose(&[
+                                "Ладно.",
+                                "Поставил.",
+                                "И зачем это было?",
+                                "Уф.",
+                            ]);
+                            self.say(p, 2.0);
+                        }
                     }
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
+                }
+                // ── Хаос: бежим по земле и прыгаем за курсором ───────────
+                State::ChaosChase => {
+                    let ground = self.ground_y();
+                    let cursor = get_cursor_screen_pos();
+                    let on_ground = self.pos.y >= ground - 0.5;
+
+                    if on_ground {
+                        // на земле — управляем бегом под курсор (только X)
+                        let want_x = self.clamp_chaos_x(cursor.x - WIN_W / 2.0);
+                        let dx = want_x - self.pos.x;
+                        let run = 360.0 * dt;
+                        if dx.abs() > 2.0 {
+                            self.pos.x += if run > dx.abs() { dx } else { dx.signum() * run };
+                            self.facing_left = dx < 0.0;
+                        }
+                        // прыжок: если под курсором и курсор выше рук
+                        if dx.abs() < 70.0 && cursor.y < self.grab_point().y {
+                            self.vy = -JUMP_V;
+                            // баллистический толчок к курсору по горизонтали
+                            self.chaos_vx = ((cursor.x - self.grab_point().x) * 1.2)
+                                .clamp(-260.0, 260.0);
+                        }
+                    } else {
+                        // в воздухе — баллистика, рулить нельзя
+                        self.pos.x += self.chaos_vx * dt;
+                    }
+                    self.walk_frame += dt * 16.0;
+
+                    // гравитация
+                    self.vy += GRAVITY * dt;
+                    self.pos.y += self.vy * dt;
+                    if self.pos.y > ground {
+                        self.pos.y = ground;
+                        self.vy = 0.0;
+                        self.chaos_vx = 0.0;
+                    }
+                    self.pos.x = self.clamp_chaos_x(self.pos.x);
+
+                    // поймал? (vy сохраняем — продолжит падать с курсором)
+                    if (cursor - self.grab_point()).length() < GRAB_RADIUS {
+                        self.chaos_catches += 1;
+                        self.state = State::ChaosHold;
+                        self.last_set_cursor = None;
+                        self.pick_chaos_target_x();
+                        if self.chaos_catches >= 2 {
+                            // поймала второй раз: держит курсор, приземлится — и простит
+                            self.chaos_forgiving = true;
+                            let p = self.choose(&["Опять ты.", "Снова попался.", "Ну всё."]);
+                            self.say(p, 2.0);
+                        } else {
+                            let p = self.choose(&["Попался.", "Мой.", "Ха."]);
+                            self.say(p, 2.0);
+                        }
+                    }
+
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
+                }
+
+                // ── Хаос: держим курсор руками ───────────────────────────
+                State::ChaosHold => {
+                    let ground = self.ground_y();
+                    let on_ground = self.pos.y >= ground - 0.5;
+
+                    // вырывание игнорируем когда прощаем (она уже не отпустит)
+                    if !self.chaos_forgiving {
+                        let actual = get_cursor_screen_pos();
+                        if let Some(last) = self.last_set_cursor {
+                            if (actual - last).length() > FIGHT_THRESHOLD {
+                                self.state = State::ChaosChase;
+                                self.last_set_cursor = None;
+                                let p = self.choose(&["Э! Вернись!", "Куда?!", "Не уйдёшь."]);
+                                self.say(p, 2.0);
+                            }
+                        }
+                    }
+
+                    // прощение: приземлилась с курсором → говорит и отпускает
+                    if self.chaos_forgiving && on_ground {
+                        self.pos.y = ground;
+                        self.vy = 0.0;
+                        self.chaos_vx = 0.0;
+                        self.last_set_cursor = None;     // отпускаем курсор
+                        self.chaos_mode = false;
+                        self.chaos_armed = false;
+                        self.chaos_forgiving = false;
+                        self.chaos_timer = CHAOS_GRACE_SECS;
+                        self.work_timer = 0.0;
+                        self.state = State::Idle;
+                        self.idle_timer = 1.0;
+                        let p = self.choose(&[
+                            "Ладно. Прощаю.",
+                            "В этот раз прощаю.",
+                            "Так и быть. Иди.",
+                        ]);
+                        self.say(p, 4.0);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
+                    } else if self.state == State::ChaosHold {
+                        if on_ground && !self.chaos_forgiving {
+                            // на земле — бегаем к случайной точке
+                            let dx = self.chaos_target_x - self.pos.x;
+                            if dx.abs() < 8.0 {
+                                self.pick_chaos_target_x();
+                            } else {
+                                let run = 300.0 * dt;
+                                self.pos.x += if run > dx.abs() { dx } else { dx.signum() * run };
+                                self.facing_left = dx < 0.0;
+                            }
+                        } else if !on_ground {
+                            // ещё падаем после поимки — баллистика
+                            self.pos.x += self.chaos_vx * dt;
+                        }
+                        self.walk_frame += dt * 16.0;
+
+                        // гравитация (падаем с курсором в руках)
+                        self.vy += GRAVITY * dt;
+                        self.pos.y += self.vy * dt;
+                        if self.pos.y > ground {
+                            self.pos.y = ground;
+                            self.vy = 0.0;
+                            self.chaos_vx = 0.0;
+                        }
+                        self.pos.x = self.clamp_chaos_x(self.pos.x);
+
+                        // тащим курсор за руками
+                        let hand = self.grab_point();
+                        set_cursor_screen_pos(hand.x, hand.y);
+                        self.last_set_cursor = Some(hand);
+
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
+                    }
                 }
                 _ => {}
             }
@@ -698,11 +1065,13 @@ impl eframe::App for MascotApp {
                 let center = ui.max_rect().center();
                 let painter = ui.painter();
 
+                let on_ground = self.pos.y >= self.ground_y() - 0.5;
                 draw_mascot(
                     painter, center,
                     self.state, self.activity,
                     self.walk_frame, self.facing_left,
                     self.anim_timer,
+                    self.vy, on_ground,
                 );
 
                 if let Some((ref text, _)) = self.speech {
