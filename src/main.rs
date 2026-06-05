@@ -136,11 +136,15 @@ struct MascotApp {
     rng:          u64,
     screen:       egui::Vec2,
 
-    activity:     Activity,
-    app_timer:    f32,              // интервал опроса активного окна
-    work_timer:   f32,              // сколько секунд кодим подряд
-    anim_timer:   f32,              // таймер анимации для поз
-    speech:       Option<(String, f32)>, // (текст, сколько ещё показывать)
+    activity:        Activity,
+    app_timer:       f32,
+    work_timer:      f32,
+    anim_timer:      f32,
+    speech:          Option<(String, f32)>,
+    afk_timer:       f32,
+    afk_warned:      bool,
+    boredom_timer:   f32,
+    last_mouse:      egui::Pos2,
 }
 
 impl MascotApp {
@@ -165,6 +169,10 @@ impl MascotApp {
             work_timer: 0.0,
             anim_timer: 0.0,
             speech: None,
+            afk_timer: 0.0,
+            afk_warned: false,
+            boredom_timer: 600.0,
+            last_mouse: egui::Pos2::ZERO,
         }
     }
 
@@ -191,7 +199,14 @@ impl MascotApp {
     fn say(&mut self, text: &str, secs: f32) {
         self.speech = Some((text.to_string(), secs));
     }
+
+    fn choose<'a>(&mut self, phrases: &[&'a str]) -> &'a str {
+        self.rand();
+        phrases[self.rng as usize % phrases.len()]
+    }
 }
+
+// ── Утилиты ──────────────────────────────────────────────────────────────────
 
 // ── Рисование ────────────────────────────────────────────────────────────────
 
@@ -453,35 +468,29 @@ impl eframe::App for MascotApp {
                     // смена активности — говорим что-то
                     match a {
                         Activity::Coding => {
-                            let phrases = [
-                                "О, опять кодишь.",
-                                "Снова за работу...",
-                                "Посмотрим сколько продержишься.",
-                                "Ладно, работай.",
-                            ];
-                            self.say(phrases[self.rng as usize % phrases.len()], 4.0);
+                            let p = self.choose(&[
+                                "Ладно. Работай.",
+                                "Опять за это...",
+                                "Посмотрим сколько\nпродержишься.",
+                                "Молча наблюдаю.",
+                            ]);
+                            self.say(p, 4.0);
                         }
                         Activity::Watching => {
-                            let phrases = [
-                                "YouTube? Серьёзно?",
-                                "Ну и ладно, я тоже смотрю.",
-                                "Отдыхаешь? Хм.",
-                            ];
-                            self.say(phrases[self.rng as usize % phrases.len()], 4.0);
+                            let p = self.choose(&[
+                                "YouTube. Конечно.",
+                                "Перерыв?\nЧасовой, небось.",
+                                "Ладно, и я смотрю.",
+                            ]);
+                            self.say(p, 4.0);
                         }
                         Activity::Music => {
-                            let phrases = [
-                                "О, музыка!",
-                                "Неплохой вкус.",
-                                "Потанцуем!",
-                            ];
-                            self.say(phrases[self.rng as usize % phrases.len()], 4.0);
+                            let p = self.choose(&["О. Музыка.", "Неплохо.", "Наконец-то."]);
+                            self.say(p, 3.0);
                         }
                         Activity::Normal => {
-                            // не каждый раз, только иногда
-                            if self.rng % 3 == 0 {
-                                self.say("Куда теперь?", 3.0);
-                            }
+                            let p = self.choose(&["И куда теперь?", "Хм.", "Ладно."]);
+                            self.say(p, 3.0);
                         }
                     }
                     self.activity = a;
@@ -499,6 +508,90 @@ impl eframe::App for MascotApp {
             }
         } else {
             self.work_timer = 0.0;
+        }
+
+        // AFK — мышь не двигается
+        let mouse = ctx.input(|i| i.pointer.hover_pos()).unwrap_or(self.last_mouse);
+        if (mouse - self.last_mouse).length() > 5.0 {
+            // вернулся после долгого AFK
+            if self.afk_warned {
+                let p = self.choose(&["О. Вернулся.", "Живой?", "Наконец-то."]);
+                self.say(p, 3.0);
+            }
+            self.afk_timer = 0.0;
+            self.afk_warned = false;
+            self.last_mouse = mouse;
+        } else {
+            self.afk_timer += dt;
+        }
+
+        // AFK — одна фраза когда пересекаем порог
+        if !self.afk_warned && self.speech.is_none() {
+            let threshold = if self.activity == Activity::Coding { 120.0 } else { 300.0 };
+            if self.afk_timer >= threshold {
+                let phrase = match self.activity {
+                    Activity::Coding => self.choose(&[
+                        "Эй. Ты живой?",
+                        "Ctrl+S хотя бы нажми.",
+                        "Заснул с открытым IDE.\nКлассика.",
+                    ]),
+                    Activity::Watching => self.choose(&[
+                        "Ты там уснул?",
+                        "Ты уже час смотришь.\nЭто рекорд.",
+                    ]),
+                    _ => self.choose(&["Куда ушёл?", "Ладно. Жду.", "Тихо стало."]),
+                };
+                self.say(phrase, 5.0);
+                self.afk_warned = true;
+            }
+        }
+
+        // фоллбэк — если давно ничего не происходило (8-12 минут)
+        if self.speech.is_none() {
+            self.boredom_timer -= dt;
+            if self.boredom_timer <= 0.0 {
+                let hour = (SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() % 86400) / 3600;
+
+                let phrase: &str = match self.activity {
+                    Activity::Coding => self.choose(&[
+                        "Уверен что это\nскомпилируется?",
+                        "Опять тот же баг?",
+                        "Хм. Интересное решение.\nНеправильное, но интересное.",
+                        "Комментарии писать\nне модно, да.",
+                        "Я не сплю, я наблюдаю.",
+                    ]),
+                    Activity::Watching => self.choose(&[
+                        "Ещё один ролик и всё, да?",
+                        "YouTube это не\n'небольшой перерыв'.",
+                        "Продуктивно.",
+                    ]),
+                    Activity::Music => self.choose(&[
+                        "Эта песня снова.",
+                        "Неплохо. Хотя я бы\nвыбрала другое.",
+                        "Хороший вкус. Почти.",
+                    ]),
+                    Activity::Normal if hour < 5 || hour >= 23 => self.choose(&[
+                        "Нормальные люди спят.",
+                        "Поздно уже.",
+                        "Только мы двое\nне спим. Грустно.",
+                    ]),
+                    Activity::Normal if hour < 9 => self.choose(&[
+                        "Кофе хоть выпил?",
+                        "Доброе утро.\nХотя не факт.",
+                    ]),
+                    Activity::Normal => self.choose(&[
+                        "Скучно.",
+                        "Иди уже работай.",
+                        "Я жду.",
+                        "Хоть бы музыку\nвключил.",
+                    ]),
+                };
+                self.say(phrase, 5.0);
+                self.boredom_timer = 480.0 + self.rand() * 240.0;
+            }
         }
 
         // пузырёк
@@ -552,6 +645,13 @@ impl eframe::App for MascotApp {
                         self.target = self.pos;
                         self.state = State::Idle;
                         self.idle_timer = 0.5;
+                        let p = self.choose(&[
+                            "Ладно.",
+                            "Поставил.",
+                            "И зачем это было?",
+                            "Уф.",
+                        ]);
+                        self.say(p, 2.0);
                     }
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(self.pos));
                 }
@@ -568,6 +668,18 @@ impl eframe::App for MascotApp {
                 if response.drag_started() {
                     self.state = State::Dragged;
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    let p = self.choose(&["Эй!", "Куда?", "Руки.", "Хватит."]);
+                    self.say(p, 2.0);
+                }
+                if response.clicked() {
+                    let p = self.choose(&[
+                        "Не тронь.",
+                        "Что надо?",
+                        "Стоп.",
+                        "Я вижу тебя.",
+                        "Зачем?",
+                    ]);
+                    self.say(p, 3.0);
                 }
                 if response.drag_stopped() {
                     if let Some(r) = ctx.input(|i| i.viewport().outer_rect) {
