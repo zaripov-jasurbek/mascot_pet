@@ -3,8 +3,8 @@
 use eframe::egui;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const WIN_W: f32 = 120.0;
-const WIN_H: f32 = 180.0;
+const WIN_W: f32 = 160.0;
+const WIN_H: f32 = 220.0;
 const TASKBAR_H: f32 = 50.0;
 const FEET_PAD: f32 = 40.0;
 const GRAVITY: f32 = 600.0;
@@ -18,7 +18,7 @@ fn main() -> eframe::Result<()> {
             .with_always_on_top()
             .with_resizable(false)
             .with_inner_size([WIN_W, WIN_H])
-            .with_position([200.0, 810.0]),
+            .with_position([200.0, 780.0]),
         ..Default::default()
     };
     eframe::run_native("mascot", options, Box::new(|_cc| Ok(Box::new(MascotApp::new()))))
@@ -377,31 +377,50 @@ fn draw_mascot(
 }
 
 fn draw_speech(painter: &egui::Painter, center: egui::Pos2, text: &str) {
-    let pos = center + egui::vec2(0.0, -100.0);
-    let padding = egui::vec2(8.0, 6.0);
-    let font = egui::FontId::proportional(11.0);
+    let font = egui::FontId::proportional(12.0);
+    let max_w = WIN_W - 16.0; // не вылезаем за края окна
+    let pad = egui::vec2(10.0, 7.0);
 
-    // размер пузырька
-    let text_len = text.chars().count() as f32 * 6.5;
-    let w = text_len.max(60.0) + padding.x * 2.0;
-    let rect = egui::Rect::from_center_size(pos, egui::vec2(w, 24.0));
+    // разбиваем длинный текст на строки по 18 символов
+    let lines: Vec<&str> = if text.len() <= 20 {
+        vec![text]
+    } else {
+        text.split('\n').collect()
+    };
 
-    painter.rect_filled(rect, 6.0, egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230));
-    painter.rect_stroke(rect, 6.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 140, 210)));
+    let line_h = 15.0;
+    let bubble_h = line_h * lines.len() as f32 + pad.y * 2.0;
+    let bubble_w = lines.iter()
+        .map(|l| l.chars().count() as f32 * 7.0 + pad.x * 2.0)
+        .fold(60.0f32, f32::max)
+        .min(max_w);
 
-    // хвостик пузырька
-    let tip = pos + egui::vec2(0.0, 16.0);
+    // пузырёк над головой — внутри окна
+    let pos = egui::pos2(center.x, center.y - 80.0);
+    let rect = egui::Rect::from_center_size(pos, egui::vec2(bubble_w, bubble_h));
+
+    painter.rect_filled(rect, 7.0, egui::Color32::from_rgba_unmultiplied(25, 25, 35, 235));
+    painter.rect_stroke(rect, 7.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(180, 140, 210)));
+
+    // хвостик
+    let tip = egui::pos2(center.x, rect.max.y + 8.0);
     painter.add(egui::Shape::convex_polygon(
-        vec![
-            tip,
-            tip + egui::vec2(-6.0, -8.0),
-            tip + egui::vec2(6.0, -8.0),
-        ],
-        egui::Color32::from_rgba_unmultiplied(30, 30, 30, 230),
+        vec![tip, tip + egui::vec2(-7.0, -10.0), tip + egui::vec2(7.0, -10.0)],
+        egui::Color32::from_rgba_unmultiplied(25, 25, 35, 235),
         egui::Stroke::NONE,
     ));
 
-    painter.text(pos, egui::Align2::CENTER_CENTER, text, font, egui::Color32::WHITE);
+    // текст
+    for (i, line) in lines.iter().enumerate() {
+        let y = rect.min.y + pad.y + line_h * i as f32 + line_h * 0.5;
+        painter.text(
+            egui::pos2(center.x, y),
+            egui::Align2::CENTER_CENTER,
+            line,
+            font.clone(),
+            egui::Color32::WHITE,
+        );
+    }
 }
 
 // ── App impl ──────────────────────────────────────────────────────────────────
@@ -430,7 +449,43 @@ impl eframe::App for MascotApp {
             self.app_timer = 2.0;
             let (proc, title) = foreground_info();
             if let Some(a) = classify(&proc, &title) {
-                self.activity = a;
+                if a != self.activity {
+                    // смена активности — говорим что-то
+                    match a {
+                        Activity::Coding => {
+                            let phrases = [
+                                "О, опять кодишь.",
+                                "Снова за работу...",
+                                "Посмотрим сколько продержишься.",
+                                "Ладно, работай.",
+                            ];
+                            self.say(phrases[self.rng as usize % phrases.len()], 4.0);
+                        }
+                        Activity::Watching => {
+                            let phrases = [
+                                "YouTube? Серьёзно?",
+                                "Ну и ладно, я тоже смотрю.",
+                                "Отдыхаешь? Хм.",
+                            ];
+                            self.say(phrases[self.rng as usize % phrases.len()], 4.0);
+                        }
+                        Activity::Music => {
+                            let phrases = [
+                                "О, музыка!",
+                                "Неплохой вкус.",
+                                "Потанцуем!",
+                            ];
+                            self.say(phrases[self.rng as usize % phrases.len()], 4.0);
+                        }
+                        Activity::Normal => {
+                            // не каждый раз, только иногда
+                            if self.rng % 3 == 0 {
+                                self.say("Куда теперь?", 3.0);
+                            }
+                        }
+                    }
+                    self.activity = a;
+                }
             }
         }
 
