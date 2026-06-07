@@ -1,19 +1,30 @@
 [package]
 name = "ai_agent"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-eframe = "0.29"
-egui = "0.29"
-image = { version = "0.25", default-features = false, features = ["png"] }
+bevy = "0.18"
+# VRM 1.0 + VRMA анимации, spring-bones, LookAt::Cursor из коробки
+bevy_vrm1 = "0.7"
 
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_System_Threading",
+# Детекция активности пользователя (idle-время, активное окно/процесс)
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = [
     "Win32_Foundation",
-] }
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+]
+
+# Ускоряем рантайм в debug: наш код -O1, зависимости (Bevy) -O3.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
 
 [profile.release]
 opt-level = 3
