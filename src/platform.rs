@@ -12,8 +12,8 @@ mod imp {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, SystemParametersInfoW,
-        SPI_GETWORKAREA,
+        GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, SetCursorPos,
+        SystemParametersInfoW, SPI_GETWORKAREA,
     };
 
     /// Позиция курсора в экранных координатах (пиксели).
@@ -25,6 +25,13 @@ mod imp {
             } else {
                 (p.x, p.y)
             }
+        }
+    }
+
+    /// Переместить курсор (кража курсора в режиме хауса).
+    pub fn set_cursor_pos(x: i32, y: i32) {
+        unsafe {
+            SetCursorPos(x, y);
         }
     }
 
@@ -119,9 +126,10 @@ mod imp {
     pub fn cursor_pos() -> (i32, i32) {
         (0, 0)
     }
+    pub fn set_cursor_pos(_x: i32, _y: i32) {}
 }
 
-pub use imp::{cursor_pos, foreground_exe, idle_seconds, work_area};
+pub use imp::{cursor_pos, foreground_exe, idle_seconds, set_cursor_pos, work_area};
 
 /// Считается ли активное окно редактором кода / IDE / терминалом.
 pub fn is_editor(exe: &str) -> bool {
