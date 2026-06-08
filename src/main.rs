@@ -366,6 +366,7 @@ fn falling_system(
     // чтобы оно доиграло точно к касанию (мгновенно, без кроссфейда).
     if !mascot.fall_switched && now - mascot.entered >= mascot.fall_switch {
         mascot.fall_switched = true;
+        mascot.fall_slow = false; // парашютный hanging закончился — дальше обычное падение
         play(
             &mut commands,
             &lib,
