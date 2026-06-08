@@ -99,7 +99,7 @@ mod imp {
             }
             let full = String::from_utf16_lossy(&buf[..size as usize]);
             let name = full
-                .rsplit(|c| c == '\\' || c == '/')
+                .rsplit(['\\', '/'])
                 .next()
                 .unwrap_or("")
                 .to_lowercase();
