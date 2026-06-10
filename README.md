@@ -47,6 +47,15 @@ powershell -ExecutionPolicy Bypass -File scripts\package.ps1
 Создаст `dist\mascot\` (exe + DLL + модель + assets + voice.toml) и
 `dist\mascot-win64.zip` — этот zip и публикуется в Releases.
 
+### 4. Авто-релиз (GitHub Actions)
+Можно не собирать вручную: запушь тег — CI сам соберёт zip и опубликует Release.
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+Workflow: `.github/workflows/release.yml` (ручной запуск через *Actions → Release →
+Run workflow* кладёт zip в Artifacts без публикации).
+
 ---
 
 ## Голосовые команды
