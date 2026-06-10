@@ -13,7 +13,6 @@ mod platform;
 mod voice;
 
 use std::fs;
-use std::path::Path;
 use std::time::Duration;
 
 use bevy::animation::RepeatAnimation;
@@ -26,9 +25,23 @@ use bevy_vrm1::prelude::*;
 use platform::{cursor_pos, foreground_exe, idle_seconds, is_editor, set_cursor_pos, work_area};
 use std::f32::consts::FRAC_PI_2;
 
-const ASSETS_DIR: &str = "D:/apps/ai_agent/assets";
+const ASSETS_DIR: &str = "assets";
 const MODEL: &str = "vrm1_model.vrm";
 const ANIM_SUBDIR: &str = "anim";
+
+/// Путь к ресурсу относительно папки с exe (для распакованной сборки по двойному
+/// клику), с фолбэком на рабочую папку — чтобы `cargo run` из корня тоже работал.
+pub(crate) fn resource_path(rel: &str) -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join(rel);
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+    std::path::PathBuf::from(rel)
+}
 
 // --- Доли рабочей области экрана (всё остальное вычисляется из них при старте) ---
 const WIN_H_FRAC: f32 = 0.30; // высота окна = 30% высоты рабочей области
@@ -251,6 +264,8 @@ impl Mascot {
 fn main() {
     // Всё конфигурируется от рабочей области экрана, полученной при старте.
     let cfg = Config::from_work_area();
+    // Абсолютный путь к assets (рядом с exe в сборке, либо ./assets при cargo run).
+    let assets_path = resource_path(ASSETS_DIR).to_string_lossy().into_owned();
 
     App::new()
         .insert_resource(ClearColor(Color::NONE))
@@ -282,7 +297,7 @@ fn main() {
                     ..default()
                 })
                 .set(AssetPlugin {
-                    file_path: ASSETS_DIR.into(),
+                    file_path: assets_path.clone(),
                     ..default()
                 }),
         )
@@ -542,7 +557,7 @@ fn setup_light(mut commands: Commands) {
 }
 
 fn spawn_vrm(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let anim_dir = Path::new(ASSETS_DIR).join(ANIM_SUBDIR);
+    let anim_dir = resource_path(ASSETS_DIR).join(ANIM_SUBDIR);
     let mut files: Vec<String> = fs::read_dir(&anim_dir)
         .into_iter()
         .flatten()

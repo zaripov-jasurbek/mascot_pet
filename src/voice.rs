@@ -43,7 +43,8 @@ impl Plugin for VoicePlugin {
             cfg.wake
         );
 
-        match start_listener(cfg.model.clone()) {
+        let model_path = crate::resource_path(&cfg.model).to_string_lossy().into_owned();
+        match start_listener(model_path) {
             Ok(rx) => {
                 app.insert_resource(VoiceRx(Mutex::new(rx)))
                     .insert_resource(index)
@@ -88,7 +89,7 @@ struct VoiceConfig {
 
 impl VoiceConfig {
     fn load() -> Self {
-        match std::fs::read_to_string(CONFIG_PATH) {
+        match std::fs::read_to_string(crate::resource_path(CONFIG_PATH)) {
             Ok(s) => toml::from_str(&s).unwrap_or_else(|e| {
                 error!("voice: ошибка разбора {CONFIG_PATH}: {e} — беру дефолт");
                 Self::default()
