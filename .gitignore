@@ -1,3 +1,5 @@
 /target/
 /.claude/
 convert_anim.ps1
+/vendor/
+/models/
