@@ -1,0 +1,5 @@
+# Путь к libvosk.lib для линковки vosk-sys на Windows.
+# libvosk.dll (+ libgcc/ libstdc++/ libwinpthread) ищется в рантайме —
+# добавляем vendor-папку в PATH при запуске (см. README / команду запуска).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-L", "native=vendor/vosk-win64-0.3.45"]

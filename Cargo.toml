@@ -7,6 +7,11 @@ edition = "2021"
 bevy = "0.18"
 # VRM 1.0 + VRMA анимации, spring-bones, LookAt::Cursor из коробки
 bevy_vrm1 = "0.7"
+cpal = "0.15"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"
+vosk = "0.3.1"
 
 # Детекция активности пользователя (idle-время, активное окно/процесс)
 [target.'cfg(windows)'.dependencies.windows-sys]

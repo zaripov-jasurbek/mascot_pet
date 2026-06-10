@@ -1,0 +1,44 @@
+name: Release
+
+# Авто-сборка готового zip для раздачи.
+#   - по пушу тега вида v1.0  → собирает и публикует GitHub Release
+#   - ручной запуск (Run workflow) → собирает и кладёт zip в Artifacts (без релиза)
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # нужно, чтобы создать Release и загрузить ассет
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fetch native deps (libvosk + Vosk model)
+        run: powershell -ExecutionPolicy Bypass -File scripts/fetch-deps.ps1
+
+      - name: Build release & package zip
+        run: powershell -ExecutionPolicy Bypass -File scripts/package.ps1
+
+      - name: Publish GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/mascot-win64.zip
+          generate_release_notes: true
+
+      - name: Upload artifact (manual runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mascot-win64
+          path: dist/mascot-win64.zip
