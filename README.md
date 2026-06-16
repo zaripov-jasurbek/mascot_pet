@@ -36,7 +36,6 @@ powershell -ExecutionPolicy Bypass -File scripts\fetch-deps.ps1
 
 ### 2. Запуск
 ```powershell
-$env:PATH = "$PWD\vendor\vosk-win64-0.3.45;$env:PATH"   # чтобы нашёлся libvosk.dll
 cargo run
 ```
 

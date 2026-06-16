@@ -29,6 +29,5 @@ if (-not (Test-Path "models\vosk-model-small-ru-0.22")) {
 } else { Write-Host "Модель уже на месте — пропускаю." }
 
 Write-Host "`nГотово. Теперь:"
-Write-Host '  $env:PATH = "$PWD\vendor\vosk-win64-0.3.45;$env:PATH"'
 Write-Host "  cargo run"
 

@@ -32,15 +32,34 @@ const ANIM_SUBDIR: &str = "anim";
 /// Путь к ресурсу относительно папки с exe (для распакованной сборки по двойному
 /// клику), с фолбэком на рабочую папку — чтобы `cargo run` из корня тоже работал.
 pub(crate) fn resource_path(rel: &str) -> std::path::PathBuf {
+    let rel_path = std::path::PathBuf::from(rel);
+    if rel_path.is_absolute() {
+        return rel_path;
+    }
+
+    fn usable(path: &std::path::Path, rel: &str) -> bool {
+        if rel == ASSETS_DIR {
+            path.join(MODEL).exists() && path.join(ANIM_SUBDIR).join("idle.vrma").exists()
+        } else {
+            path.exists()
+        }
+    }
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let p = dir.join(rel);
-            if p.exists() {
+            if usable(&p, rel) {
                 return p;
             }
         }
     }
-    std::path::PathBuf::from(rel)
+
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+    if usable(&p, rel) {
+        return p;
+    }
+
+    rel_path
 }
 
 // --- Доли рабочей области экрана (всё остальное вычисляется из них при старте) ---
@@ -276,7 +295,7 @@ fn main() {
             DefaultPlugins
                 .set(RenderPlugin {
                     render_creation: RenderCreation::Automatic(WgpuSettings {
-                        backends: Some(Backends::VULKAN),
+                        backends: Some(Backends::DX12),
                         ..default()
                     }),
                     ..default()
