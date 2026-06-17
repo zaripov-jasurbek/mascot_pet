@@ -11,10 +11,10 @@
 Не нужен ни Rust, ни сборка.
 
 1. Открой страницу **[Releases](../../releases)** этого репозитория.
-2. Скачай `mascot-win64.zip` из последнего релиза.
+2. Скачай нужный языковой архив из последнего релиза: `mascot_ru.zip` или `mascot_en.zip`.
 3. Распакуй папку и запусти **`mascot.exe`** (двойной клик).
 
-Подробности — в файле `ПРОЧТИ-МЕНЯ.txt` внутри архива.
+Подробности — в файле `README.txt` внутри архива.
 
 > Требуется Windows 10/11 с видеокартой, поддерживающей Vulkan (почти все
 > современные ПК), и микрофон.
@@ -32,7 +32,7 @@
 powershell -ExecutionPolicy Bypass -File scripts\fetch-deps.ps1
 ```
 
-Скрипт положит `libvosk` в `vendor\` и русскую модель в `models\`.
+Скрипт положит `libvosk` в `vendor\`, а русскую и английскую модели в `models\`.
 
 ### 2. Запуск
 ```powershell
@@ -43,11 +43,11 @@ cargo run
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\package.ps1
 ```
-Создаст `dist\mascot\` (exe + DLL + модель + assets + voice.toml) и
-`dist\mascot-win64.zip` — этот zip и публикуется в Releases.
+Создаст два готовых архива: `dist\mascot_ru.zip` и `dist\mascot_en.zip`.
+Каждый архив содержит свою Vosk-модель и свой `voice.toml`.
 
 ### 4. Авто-релиз (GitHub Actions)
-Можно не собирать вручную: запушь тег — CI сам соберёт zip и опубликует Release.
+Можно не собирать вручную: запушь тег — CI сам соберёт оба zip и опубликует Release.
 ```powershell
 git tag v0.1.0
 git push origin v0.1.0

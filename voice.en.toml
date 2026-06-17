@@ -1,0 +1,23 @@
+# Voice control config for the English package.
+# The command runs only when the phrase contains the wake word.
+# Application paths are not stored here; they are indexed automatically from Start Menu + PATH.
+
+model = "models/vosk-model-small-en-us-0.15"
+
+wake = "assistant"
+
+verbs = ["open", "start", "launch", "run"]
+
+browser_word = "browser"
+
+[alias]
+"edge" = "microsoft edge"
+"vs code" = "visual studio code"
+
+search_url = "https://www.google.com/search?q={q}"
+
+[site]
+"youtube" = "https://youtube.com"
+"github" = "https://github.com"
+"chat" = "https://chatgpt.com"
+"chatgpt" = "https://chatgpt.com"
