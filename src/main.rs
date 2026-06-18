@@ -43,37 +43,166 @@ fn arg_value(name: &str) -> Option<String> {
     None
 }
 
-fn render_backends_from_args() -> Option<Backends> {
-    match arg_value("--backend")
-        .or_else(|| std::env::var("MASCOT_BACKEND").ok())
-        .as_deref()
-    {
-        Some("auto") | None => Some(Backends::VULKAN),
-        Some("vulkan") => Some(Backends::VULKAN),
-        Some("dx12") => Some(Backends::DX12),
-        Some("all") => Some(Backends::all()),
-        Some(other) => {
-            eprintln!("unknown --backend={other}; using vulkan");
-            Some(Backends::VULKAN)
-        }
+// Выбор бэкенда рендера и режима альфа-композита окна.
+// Подбирается при первом запуске (мастер настройки) и сохраняется в render.cfg.
+#[derive(Resource, Clone, Copy)]
+struct RenderChoice {
+    backend: Backends,
+    alpha: CompositeAlphaMode,
+}
+
+fn backend_from_name(s: &str) -> Option<Backends> {
+    match s {
+        "vulkan" => Some(Backends::VULKAN),
+        "dx12" => Some(Backends::DX12),
+        "all" => Some(Backends::all()),
+        _ => None,
     }
 }
 
-fn alpha_mode_from_args() -> CompositeAlphaMode {
-    match arg_value("--alpha")
-        .or_else(|| std::env::var("MASCOT_ALPHA").ok())
-        .as_deref()
-    {
-        Some("auto") => CompositeAlphaMode::Auto,
-        Some("opaque") => CompositeAlphaMode::Opaque,
-        Some("pre") | None => CompositeAlphaMode::PreMultiplied,
-        Some("post") => CompositeAlphaMode::PostMultiplied,
-        Some("inherit") => CompositeAlphaMode::Inherit,
-        Some(other) => {
-            eprintln!("unknown --alpha={other}; using pre");
-            CompositeAlphaMode::PreMultiplied
+fn backend_name(b: Backends) -> &'static str {
+    if b == Backends::VULKAN {
+        "vulkan"
+    } else if b == Backends::DX12 {
+        "dx12"
+    } else {
+        "all"
+    }
+}
+
+fn alpha_from_name(s: &str) -> Option<CompositeAlphaMode> {
+    match s {
+        "auto" => Some(CompositeAlphaMode::Auto),
+        "opaque" => Some(CompositeAlphaMode::Opaque),
+        "pre" => Some(CompositeAlphaMode::PreMultiplied),
+        "post" => Some(CompositeAlphaMode::PostMultiplied),
+        "inherit" => Some(CompositeAlphaMode::Inherit),
+        _ => None,
+    }
+}
+
+fn alpha_name(a: CompositeAlphaMode) -> &'static str {
+    match a {
+        CompositeAlphaMode::Auto => "auto",
+        CompositeAlphaMode::Opaque => "opaque",
+        CompositeAlphaMode::PreMultiplied => "pre",
+        CompositeAlphaMode::PostMultiplied => "post",
+        CompositeAlphaMode::Inherit => "inherit",
+    }
+}
+
+// Файл с сохранённым выбором — рядом с exe (или в корне проекта при cargo run).
+fn render_cfg_path() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            return dir.join("render.cfg");
         }
     }
+    std::path::PathBuf::from("render.cfg")
+}
+
+fn load_render_choice() -> Option<RenderChoice> {
+    let txt = std::fs::read_to_string(render_cfg_path()).ok()?;
+    let mut backend = None;
+    let mut alpha = None;
+    for line in txt.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("backend=") {
+            backend = backend_from_name(v.trim());
+        } else if let Some(v) = line.strip_prefix("alpha=") {
+            alpha = alpha_from_name(v.trim());
+        }
+    }
+    Some(RenderChoice {
+        backend: backend?,
+        alpha: alpha?,
+    })
+}
+
+fn save_render_choice(c: RenderChoice) {
+    let body = format!(
+        "backend={}\nalpha={}\n",
+        backend_name(c.backend),
+        alpha_name(c.alpha)
+    );
+    if let Err(e) = std::fs::write(render_cfg_path(), body) {
+        eprintln!("не удалось сохранить render.cfg: {e}");
+    }
+}
+
+// Явный выбор через флаги/переменные окружения (приоритетнее сохранённого).
+fn cli_choice() -> Option<RenderChoice> {
+    let b = arg_value("--backend").or_else(|| std::env::var("MASCOT_BACKEND").ok());
+    let a = arg_value("--alpha").or_else(|| std::env::var("MASCOT_ALPHA").ok());
+    if b.is_none() && a.is_none() {
+        return None;
+    }
+    Some(RenderChoice {
+        backend: b.as_deref().and_then(backend_from_name).unwrap_or(Backends::VULKAN),
+        alpha: a
+            .as_deref()
+            .and_then(alpha_from_name)
+            .unwrap_or(CompositeAlphaMode::PreMultiplied),
+    })
+}
+
+// Кандидаты для мастера настройки. Сначала режимы, способные дать прозрачность.
+// Неподдерживаемый драйвером режим роняет процесс — супервизор это переживает.
+const SETUP_CANDIDATES: &[(&str, &str)] = &[
+    ("vulkan", "pre"),
+    ("vulkan", "post"),
+    ("dx12", "pre"),
+    ("dx12", "post"),
+    ("vulkan", "auto"),
+    ("dx12", "auto"),
+];
+
+// Первый запуск: перебираем варианты дочерними процессами. Каждый показывает
+// окно с кнопками «прозрачно/следующий»; выбор пишется в render.cfg.
+// Код выхода ребёнка: 0 — сохранён, 3 — следующий, иное (паника драйвера) — пропуск.
+fn run_setup() -> RenderChoice {
+    eprintln!("=== Первый запуск: подбор режима прозрачности ===");
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => {
+            let c = RenderChoice {
+                backend: Backends::VULKAN,
+                alpha: CompositeAlphaMode::Auto,
+            };
+            save_render_choice(c);
+            return c;
+        }
+    };
+    for (b, a) in SETUP_CANDIDATES {
+        eprintln!("Пробую backend={b}, alpha={a} …");
+        let status = std::process::Command::new(&exe)
+            .arg("--trial")
+            .arg(format!("{b}:{a}"))
+            .status();
+        match status {
+            Ok(s) if s.code() == Some(0) => {
+                eprintln!("✓ Сохранён вариант backend={b}, alpha={a}");
+                return load_render_choice().unwrap_or(RenderChoice {
+                    backend: backend_from_name(b).unwrap_or(Backends::VULKAN),
+                    alpha: alpha_from_name(a).unwrap_or(CompositeAlphaMode::PreMultiplied),
+                });
+            }
+            Ok(s) if s.code() == Some(3) => {
+                eprintln!("→ следующий вариант");
+            }
+            Ok(s) => {
+                eprintln!("вариант не поддерживается (код {:?}), пропускаю", s.code());
+            }
+            Err(e) => eprintln!("не удалось запустить вариант: {e}"),
+        }
+    }
+    eprintln!("Ни один вариант не подтверждён — использую vulkan/auto");
+    let c = RenderChoice {
+        backend: Backends::VULKAN,
+        alpha: CompositeAlphaMode::Auto,
+    };
+    save_render_choice(c);
+    c
 }
 
 /// Путь к ресурсу относительно папки с exe (для распакованной сборки по двойному
@@ -328,23 +457,38 @@ impl Mascot {
 }
 
 fn main() {
+    // Внутренний режим: ребёнок мастера настройки пробует один вариант рендера.
+    if let Some(trial) = arg_value("--trial") {
+        let (b, a) = trial.split_once(':').unwrap_or(("vulkan", "pre"));
+        let choice = RenderChoice {
+            backend: backend_from_name(b).unwrap_or(Backends::VULKAN),
+            alpha: alpha_from_name(a).unwrap_or(CompositeAlphaMode::PreMultiplied),
+        };
+        run_app(choice, true);
+        return;
+    }
+    // Приоритет: флаги/env → сохранённый render.cfg → мастер первого запуска.
+    let choice = cli_choice().or_else(load_render_choice).unwrap_or_else(run_setup);
+    run_app(choice, false);
+}
+
+fn run_app(choice: RenderChoice, setup: bool) {
     // Всё конфигурируется от рабочей области экрана, полученной при старте.
     let cfg = Config::from_work_area();
     // Абсолютный путь к assets (рядом с exe в сборке, либо ./assets при cargo run).
     let assets_path = resource_path(ASSETS_DIR).to_string_lossy().into_owned();
-    let render_backends = render_backends_from_args();
-    let alpha_mode = alpha_mode_from_args();
 
-    App::new()
-        .insert_resource(ClearColor(Color::NONE))
+    let mut app = App::new();
+    app.insert_resource(ClearColor(Color::NONE))
         .insert_resource(cfg)
+        .insert_resource(choice)
         .init_resource::<AnimLibrary>()
         .init_resource::<Mascot>()
         .add_plugins(
             DefaultPlugins
                 .set(RenderPlugin {
                     render_creation: RenderCreation::Automatic(WgpuSettings {
-                        backends: render_backends,
+                        backends: Some(choice.backend),
                         ..default()
                     }),
                     ..default()
@@ -353,7 +497,7 @@ fn main() {
                     primary_window: Some(Window {
                         title: "mascot".into(),
                         transparent: true,
-                        composite_alpha_mode: alpha_mode,
+                        composite_alpha_mode: choice.alpha,
                         decorations: false,
                         window_level: WindowLevel::AlwaysOnTop,
                         resolution: UVec2::new(cfg.win_w as u32, cfg.win_h as u32).into(),
@@ -370,20 +514,10 @@ fn main() {
                 }),
         )
         .add_plugins((VrmPlugin, VrmaPlugin, MeshPickingPlugin))
-        .add_plugins(voice::VoicePlugin)
-        .add_systems(
-            Startup,
-            (
-                setup_camera,
-                setup_light,
-                spawn_vrm,
-                position_window,
-            ),
-        )
+        .add_systems(Startup, (setup_camera, setup_light, spawn_vrm, position_window))
         .add_systems(
             Update,
             (
-                voice_reaction_system.before(behavior_system),
                 behavior_system,
                 (
                     walk_movement,
@@ -397,8 +531,96 @@ fn main() {
                 facing_system,
                 breathing_system,
             ),
-        )
-        .run();
+        );
+
+    if setup {
+        eprintln!(
+            "[мастер] Вариант {} / {}: если персонаж на ПРОЗРАЧНОМ фоне — Enter (сохранить); \
+             если ЧЁРНЫЙ квадрат — Пробел (следующий).",
+            backend_name(choice.backend),
+            alpha_name(choice.alpha)
+        );
+        // Мастер настройки: оверлей с кнопками выбора прозрачного варианта.
+        app.add_systems(Startup, setup_overlay)
+            .add_systems(Update, setup_decide);
+    } else {
+        // В обычном режиме подключаем голос (в мастере не нужен — экономим старт).
+        app.add_plugins(voice::VoicePlugin)
+            .add_systems(Update, voice_reaction_system.before(behavior_system));
+    }
+
+    app.run();
+}
+
+// --- Мастер настройки рендера (только при --trial) ---
+
+#[derive(Component)]
+struct SaveBtn;
+#[derive(Component)]
+struct NextBtn;
+
+fn setup_overlay(mut commands: Commands, choice: Res<RenderChoice>) {
+    let label = format!("{} / {}", backend_name(choice.backend), alpha_name(choice.alpha));
+    commands
+        .spawn((Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            right: Val::Px(0.0),
+            bottom: Val::Px(0.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(4.0),
+            padding: UiRect::all(Val::Px(6.0)),
+            ..default()
+        },))
+        .with_children(|p| {
+            p.spawn((
+                Text::new(format!("Фон ПРОЗРАЧНЫЙ (не чёрный)?  [{label}]")),
+                TextColor(Color::WHITE),
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+            ));
+            p.spawn((
+                Button,
+                Node {
+                    padding: UiRect::all(Val::Px(6.0)),
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.15, 0.6, 0.25)),
+                SaveBtn,
+            ))
+            .with_child((Text::new("ДА — сохранить (Enter)"), TextColor(Color::WHITE)));
+            p.spawn((
+                Button,
+                Node {
+                    padding: UiRect::all(Val::Px(6.0)),
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.6, 0.2, 0.2)),
+                NextBtn,
+            ))
+            .with_child((Text::new("НЕТ — следующий (Пробел)"), TextColor(Color::WHITE)));
+        });
+}
+
+fn setup_decide(
+    keys: Res<ButtonInput<KeyCode>>,
+    choice: Res<RenderChoice>,
+    save_q: Query<&Interaction, (Changed<Interaction>, With<SaveBtn>)>,
+    next_q: Query<&Interaction, (Changed<Interaction>, With<NextBtn>)>,
+) {
+    let save = keys.just_pressed(KeyCode::Enter)
+        || save_q.iter().any(|i| *i == Interaction::Pressed);
+    let next = keys.just_pressed(KeyCode::Space)
+        || keys.just_pressed(KeyCode::Escape)
+        || next_q.iter().any(|i| *i == Interaction::Pressed);
+    if save {
+        save_render_choice(*choice);
+        std::process::exit(0);
+    }
+    if next {
+        std::process::exit(3);
+    }
 }
 
 // Стартовая позиция: правый-нижний угол, ноги на таскбаре.
