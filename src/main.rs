@@ -29,6 +29,53 @@ const ASSETS_DIR: &str = "assets";
 const MODEL: &str = "vrm1_model.vrm";
 const ANIM_SUBDIR: &str = "anim";
 
+fn arg_value(name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == name {
+            return args.next();
+        }
+        if let Some(value) = arg.strip_prefix(&prefix) {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn render_backends_from_args() -> Option<Backends> {
+    match arg_value("--backend")
+        .or_else(|| std::env::var("MASCOT_BACKEND").ok())
+        .as_deref()
+    {
+        Some("auto") | None => Some(Backends::DX12),
+        Some("dx12") => Some(Backends::DX12),
+        Some("vulkan") => Some(Backends::VULKAN),
+        Some("all") => Some(Backends::all()),
+        Some(other) => {
+            eprintln!("unknown --backend={other}; using dx12");
+            Some(Backends::DX12)
+        }
+    }
+}
+
+fn alpha_mode_from_args() -> CompositeAlphaMode {
+    match arg_value("--alpha")
+        .or_else(|| std::env::var("MASCOT_ALPHA").ok())
+        .as_deref()
+    {
+        Some("auto") => CompositeAlphaMode::Auto,
+        Some("opaque") => CompositeAlphaMode::Opaque,
+        Some("pre") | None => CompositeAlphaMode::PreMultiplied,
+        Some("post") => CompositeAlphaMode::PostMultiplied,
+        Some("inherit") => CompositeAlphaMode::Inherit,
+        Some(other) => {
+            eprintln!("unknown --alpha={other}; using pre");
+            CompositeAlphaMode::PreMultiplied
+        }
+    }
+}
+
 /// Путь к ресурсу относительно папки с exe (для распакованной сборки по двойному
 /// клику), с фолбэком на рабочую папку — чтобы `cargo run` из корня тоже работал.
 pub(crate) fn resource_path(rel: &str) -> std::path::PathBuf {
@@ -285,6 +332,8 @@ fn main() {
     let cfg = Config::from_work_area();
     // Абсолютный путь к assets (рядом с exe в сборке, либо ./assets при cargo run).
     let assets_path = resource_path(ASSETS_DIR).to_string_lossy().into_owned();
+    let render_backends = render_backends_from_args();
+    let alpha_mode = alpha_mode_from_args();
 
     App::new()
         .insert_resource(ClearColor(Color::NONE))
@@ -295,7 +344,7 @@ fn main() {
             DefaultPlugins
                 .set(RenderPlugin {
                     render_creation: RenderCreation::Automatic(WgpuSettings {
-                        backends: Some(Backends::DX12),
+                        backends: render_backends,
                         ..default()
                     }),
                     ..default()
@@ -304,7 +353,7 @@ fn main() {
                     primary_window: Some(Window {
                         title: "mascot".into(),
                         transparent: true,
-                        composite_alpha_mode: CompositeAlphaMode::PreMultiplied,
+                        composite_alpha_mode: alpha_mode,
                         decorations: false,
                         window_level: WindowLevel::AlwaysOnTop,
                         resolution: UVec2::new(cfg.win_w as u32, cfg.win_h as u32).into(),
