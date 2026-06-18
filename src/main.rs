@@ -48,13 +48,13 @@ fn render_backends_from_args() -> Option<Backends> {
         .or_else(|| std::env::var("MASCOT_BACKEND").ok())
         .as_deref()
     {
-        Some("auto") | None => Some(Backends::DX12),
-        Some("dx12") => Some(Backends::DX12),
+        Some("auto") | None => Some(Backends::VULKAN),
         Some("vulkan") => Some(Backends::VULKAN),
+        Some("dx12") => Some(Backends::DX12),
         Some("all") => Some(Backends::all()),
         Some(other) => {
-            eprintln!("unknown --backend={other}; using dx12");
-            Some(Backends::DX12)
+            eprintln!("unknown --backend={other}; using vulkan");
+            Some(Backends::VULKAN)
         }
     }
 }
