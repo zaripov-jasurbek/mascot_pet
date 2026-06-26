@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "ai_agent"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "bevy",
  "bevy_vrm1",

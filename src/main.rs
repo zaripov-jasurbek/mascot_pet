@@ -22,7 +22,11 @@ use bevy::render::RenderPlugin;
 use bevy::window::{CompositeAlphaMode, Window, WindowLevel, WindowPosition};
 use bevy_vrm1::prelude::*;
 
-use platform::{cursor_pos, foreground_exe, idle_seconds, is_editor, set_cursor_pos, work_area};
+use platform::{
+    cursor_pos, foreground_exe, idle_seconds, is_editor, set_cursor_pos,
+    start_music_detector, work_area,
+};
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::f32::consts::FRAC_PI_2;
 
 const ASSETS_DIR: &str = "assets";
@@ -349,6 +353,8 @@ enum State {
     ChaseRun,  // бежит к курсору
     JumpingUp, // прыгает к цели (клип играет 1 раз и замирает на апексе)
     Saluting,  // приветствие-подтверждение голосовой команды (one-shot)
+    Dancing,   // танцует пока играет музыка (случайно simple_dance или simple_dance_2)
+    DanceEnd,  // завершающий клип ending_dance (one-shot), потом Idle
 }
 
 impl State {
@@ -366,6 +372,8 @@ impl State {
             State::ChaseRun => "run",
             State::JumpingUp => "jumping_up",
             State::Saluting => "salute",
+            State::Dancing => "simple_dance", // переопределяется при входе случайно
+            State::DanceEnd => "ending_dance",
         }
     }
 
@@ -379,7 +387,7 @@ impl State {
 
     // Разовые анимации (прыжок, салют) — играем один раз, замирают на последнем кадре.
     fn one_shot(self) -> bool {
-        matches!(self, State::JumpingUp | State::Saluting)
+        matches!(self, State::JumpingUp | State::Saluting | State::DanceEnd)
     }
 
     // Боком к зрителю (бег/ходьба вдоль экрана).
@@ -396,6 +404,10 @@ impl State {
             )
     }
 }
+
+/// Флаг детектора музыки: `true` = звук выше порога прямо сейчас.
+#[derive(Resource)]
+struct MusicDetector(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 // Библиотека анимаций: имя (без .vrma) → сущность VRMA.
 #[derive(Resource, Default)]
@@ -482,6 +494,7 @@ fn run_app(choice: RenderChoice, setup: bool) {
     app.insert_resource(ClearColor(Color::NONE))
         .insert_resource(cfg)
         .insert_resource(choice)
+        .insert_resource(MusicDetector(start_music_detector()))
         .init_resource::<AnimLibrary>()
         .init_resource::<Mascot>()
         .add_plugins(
@@ -968,7 +981,18 @@ fn enter(mascot: &mut Mascot, commands: &mut Commands, lib: &AnimLibrary, now: f
     } else {
         RepeatAnimation::Forever
     };
-    play(commands, lib, new.anim(), transition, repeat);
+    // Dancing: случайно simple_dance или simple_dance_2 (если оба есть).
+    let anim = if new == State::Dancing {
+        let has2 = lib.map.contains_key("simple_dance_2");
+        if has2 && mascot.rand01() > 0.5 {
+            "simple_dance_2"
+        } else {
+            "simple_dance"
+        }
+    } else {
+        new.anim()
+    };
+    play(commands, lib, anim, transition, repeat);
 }
 
 // Запустить падение. `caught` различает два сценария:
@@ -1061,7 +1085,8 @@ fn behavior_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     lib: Res<AnimLibrary>,
-    mut editor_cache: Local<(f32, bool)>, // (время следующей проверки, закэшированный «редактор активен»)
+    music: Res<MusicDetector>,
+    mut editor_cache: Local<(f32, bool)>,
     mut mascot: ResMut<Mascot>,
     mut commands: Commands,
 ) {
@@ -1104,11 +1129,27 @@ fn behavior_system(
         return;
     }
 
+    let music_on = music.0.load(AtomicOrdering::Relaxed);
+
     // Определяем желаемое состояние (по приоритету).
     let desired = if now < mascot.cry_until {
         State::Crying
     } else if editor && idle < TYPING_GRACE {
         State::Typing
+    } else if music_on && matches!(mascot.state, State::Idle | State::Walking | State::Dancing) {
+        // Музыка играет → танцевать; при входе в Dancing выбираем клип случайно.
+        State::Dancing
+    } else if !music_on && mascot.state == State::Dancing {
+        // Музыка остановилась → финальный клип ending_dance, потом Idle.
+        State::DanceEnd
+    } else if mascot.state == State::DanceEnd {
+        // DanceEnd — one-shot; ждём окончания клипа (длительность ending_dance ≈ 3.5 с).
+        const DANCE_END_DUR: f32 = 3.5;
+        if now >= mascot.entered + DANCE_END_DUR {
+            State::Idle
+        } else {
+            State::DanceEnd
+        }
     } else {
         match mascot.state {
             // начатую прогулку доводим до конца (8 c), потом вернёмся в idle
@@ -1169,6 +1210,10 @@ fn expression_system(
         }
         // радостное лицо при приветствии-подтверждении команды
         State::Saluting => {
+            weights.push(("happy", 1.0));
+        }
+        // радостное лицо во время танца
+        State::Dancing | State::DanceEnd => {
             weights.push(("happy", 1.0));
         }
         _ => {} // нейтральное лицо

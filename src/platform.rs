@@ -1,6 +1,14 @@
 // Детекция активности пользователя через WinAPI:
 //   - сколько секунд назад был последний ввод (мышь/клавиатура)
 //   - имя exe активного окна (для распознавания «кодит»)
+//
+// Детект музыки:
+//   Windows  — WASAPI loopback через cpal: измеряем RMS системного аудиовыхода.
+//              Работает с любым источником (браузер, Spotify, Yandex Music и т.д.).
+//   macOS    — TODO: использовать приватный фреймворк MediaRemote через objc-крейт.
+//              MediaRemote виден в виджете «Сейчас играет» macOS и охватывает все плееры.
+//              Ссылки: https://github.com/nickcoutsos/mediaremote-bindings
+//              Функция start_music_detector() возвращает заглушку (false) до реализации.
 
 #[cfg(windows)]
 mod imp {
@@ -152,4 +160,74 @@ pub fn is_editor(exe: &str) -> bool {
         "cmd.exe",
     ];
     EDITORS.contains(&exe)
+}
+
+/// Запускает фоновый поток детекта музыки.
+/// Возвращает `Arc<AtomicBool>` — `true` пока играет звук выше порога.
+///
+/// Windows: WASAPI loopback (cpal) — захватывает системный аудиовыход,
+///          работает с любым плеером (браузер, Spotify, Yandex Music).
+/// macOS:   заглушка (всегда false).
+///          TODO: реализовать через MediaRemote (objc-крейт).
+///          Фреймворк приватный, но стабильный — используется виджетом
+///          «Сейчас играет» macOS. Охватывает браузер, Spotify, Yandex Music.
+///          Пример биндингов: https://github.com/nickcoutsos/mediaremote-bindings
+pub fn start_music_detector() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    #[cfg(windows)]
+    {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let playing = Arc::new(AtomicBool::new(false));
+        let flag = playing.clone();
+
+        std::thread::spawn(move || {
+            let host = cpal::default_host();
+            let device = match host.default_output_device() {
+                Some(d) => d,
+                None => return,
+            };
+            let config = match device.default_output_config() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+
+            // Сглаженный RMS — экспоненциальное скользящее среднее по блокам.
+            // Порог 0.008 ≈ тихая музыка/речь; ниже — фоновый шум карты.
+            const THRESHOLD: f32 = 0.008;
+            const ALPHA: f32 = 0.05; // скорость сглаживания (меньше = медленнее)
+
+            let smooth = std::sync::Arc::new(std::sync::Mutex::new(0.0f32));
+            let smooth2 = smooth.clone();
+
+            let stream = device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    let rms = (data.iter().map(|s| s * s).sum::<f32>() / data.len() as f32).sqrt();
+                    let mut s = smooth2.lock().unwrap();
+                    *s = *s * (1.0 - ALPHA) + rms * ALPHA;
+                    flag.store(*s > THRESHOLD, Ordering::Relaxed);
+                },
+                |err| eprintln!("music detector error: {err}"),
+                None,
+            );
+
+            if let Ok(stream) = stream {
+                stream.play().ok();
+                // держим поток живым вечно
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                }
+            }
+        });
+
+        playing
+    }
+
+    #[cfg(not(windows))]
+    {
+        // macOS / Linux: заглушка
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))
+    }
 }
