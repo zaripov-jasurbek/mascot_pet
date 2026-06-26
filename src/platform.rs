@@ -20,7 +20,7 @@ mod imp {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, SetCursorPos,
+        GetCursorPos, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId, SetCursorPos,
         SystemParametersInfoW, SPI_GETWORKAREA,
     };
 
@@ -118,6 +118,28 @@ mod imp {
             }
         }
     }
+
+    /// Заголовок активного окна в нижнем регистре (например, заголовок вкладки браузера).
+    /// Нужен, чтобы по активной вкладке отличить музыкальный сайт от видео.
+    pub fn foreground_title() -> Option<String> {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() {
+                return None;
+            }
+            let mut buf = [0u16; 512];
+            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            if len <= 0 {
+                return None;
+            }
+            let s = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -126,6 +148,9 @@ mod imp {
         0.0
     }
     pub fn foreground_exe() -> Option<String> {
+        None
+    }
+    pub fn foreground_title() -> Option<String> {
         None
     }
     pub fn work_area() -> (i32, i32, i32, i32) {
@@ -137,7 +162,9 @@ mod imp {
     pub fn set_cursor_pos(_x: i32, _y: i32) {}
 }
 
-pub use imp::{cursor_pos, foreground_exe, idle_seconds, set_cursor_pos, work_area};
+pub use imp::{
+    cursor_pos, foreground_exe, foreground_title, idle_seconds, set_cursor_pos, work_area,
+};
 
 /// Считается ли активное окно редактором кода / IDE / терминалом.
 pub fn is_editor(exe: &str) -> bool {
@@ -160,6 +187,58 @@ pub fn is_editor(exe: &str) -> bool {
         "cmd.exe",
     ];
     EDITORS.contains(&exe)
+}
+
+/// Браузер ли это — для них смотрим заголовок активной вкладки.
+fn is_browser(exe: &str) -> bool {
+    const BROWSERS: &[&str] = &[
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "brave.exe",
+        "opera.exe",
+        "opera_gx.exe",
+        "browser.exe", // Яндекс Браузер
+        "vivaldi.exe",
+        "zen.exe",
+        "arc.exe",
+    ];
+    BROWSERS.contains(&exe)
+}
+
+/// Музыкальный ли контекст у активного окна: десктоп-плеер или
+/// музыкальный сайт в активной вкладке браузера. `title` — в нижнем регистре.
+///
+/// Активная вкладка — намеренно: если пользователь смотрит аниме/видео,
+/// активное окно = видео (не музыкальный сайт) → не танцуем. Музыка в фоновой
+/// вкладке пока на фокусе чужого окна не ловится (для этого нужен UI Automation).
+pub fn is_music_window(exe: Option<&str>, title: Option<&str>) -> bool {
+    let Some(exe) = exe else {
+        return false;
+    };
+    // Десктоп-приложения музыки.
+    if matches!(exe, "spotify.exe" | "yandexmusic.exe" | "яндекс музыка.exe") {
+        return true;
+    }
+    // Браузер: ищем музыкальный сайт в заголовке активной вкладки.
+    if is_browser(exe) {
+        if let Some(t) = title {
+            const MUSIC_SITES: &[&str] = &[
+                "яндекс музык",  // Яндекс Музыка
+                "yandex music",
+                "youtube music", // именно music, не обычный youtube
+                "music.youtube",
+                "spotify",
+                "soundcloud",
+                "deezer",
+                "вк музык", // VK Музыка
+                "vk music",
+                "apple music",
+            ];
+            return MUSIC_SITES.iter().any(|s| t.contains(s));
+        }
+    }
+    false
 }
 
 /// Запускает фоновый поток детекта музыки.

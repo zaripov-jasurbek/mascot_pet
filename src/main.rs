@@ -23,8 +23,8 @@ use bevy::window::{CompositeAlphaMode, Window, WindowLevel, WindowPosition};
 use bevy_vrm1::prelude::*;
 
 use platform::{
-    cursor_pos, foreground_exe, idle_seconds, is_editor, set_cursor_pos,
-    start_music_detector, work_area,
+    cursor_pos, foreground_exe, foreground_title, idle_seconds, is_editor, is_music_window,
+    set_cursor_pos, start_music_detector, work_area,
 };
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::f32::consts::FRAC_PI_2;
@@ -1086,7 +1086,7 @@ fn behavior_system(
     keys: Res<ButtonInput<KeyCode>>,
     lib: Res<AnimLibrary>,
     music: Res<MusicDetector>,
-    mut editor_cache: Local<(f32, bool)>,
+    mut fg_cache: Local<(f32, bool, bool)>, // (время след. проверки, редактор активен, муз. контекст)
     mut mascot: ResMut<Mascot>,
     mut commands: Commands,
 ) {
@@ -1107,12 +1107,15 @@ fn behavior_system(
     let idle = idle_seconds();
     // foreground_exe() открывает хэндл процесса — дорого делать каждый кадр.
     // Опрашиваем ~3 раза в секунду, между опросами берём кэш.
-    let (next_check, cached) = &mut *editor_cache;
+    let (next_check, cached_editor, cached_music) = &mut *fg_cache;
     if now >= *next_check {
-        *cached = foreground_exe().as_deref().map(is_editor).unwrap_or(false);
+        let fg = foreground_exe();
+        *cached_editor = fg.as_deref().map(is_editor).unwrap_or(false);
+        *cached_music = is_music_window(fg.as_deref(), foreground_title().as_deref());
         *next_check = now + 0.3;
     }
-    let editor = *cached;
+    let editor = *cached_editor;
+    let music_ctx = *cached_music;
 
     // Таймер переработки: копим время кодинга, перерыв (долгое бездействие) сбрасывает.
     let coding = editor && idle < TYPING_GRACE;
@@ -1129,7 +1132,9 @@ fn behavior_system(
         return;
     }
 
-    let music_on = music.0.load(AtomicOrdering::Relaxed);
+    // Танцуем, только если звук реально слышен (WASAPI) И активное окно —
+    // музыкальный контекст (плеер/муз-сайт). Так аниме/видео не вызывает танец.
+    let music_on = music.0.load(AtomicOrdering::Relaxed) && music_ctx;
 
     // Определяем желаемое состояние (по приоритету).
     let desired = if now < mascot.cry_until {
