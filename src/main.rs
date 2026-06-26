@@ -568,38 +568,47 @@ fn setup_overlay(mut commands: Commands, choice: Res<RenderChoice>) {
             right: Val::Px(0.0),
             bottom: Val::Px(0.0),
             flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(4.0),
-            padding: UiRect::all(Val::Px(6.0)),
+            row_gap: Val::Px(2.0),
+            padding: UiRect::all(Val::Px(4.0)),
             ..default()
         },))
         .with_children(|p| {
             p.spawn((
-                Text::new(format!("Фон ПРОЗРАЧНЫЙ (не чёрный)?  [{label}]")),
+                Text::new(format!("Background TRANSPARENT?  [{label}]")),
+                TextFont { font_size: 11.0, ..default() },
                 TextColor(Color::WHITE),
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
             ));
             p.spawn((
                 Button,
                 Node {
-                    padding: UiRect::all(Val::Px(6.0)),
+                    padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                     justify_content: JustifyContent::Center,
                     ..default()
                 },
                 BackgroundColor(Color::srgb(0.15, 0.6, 0.25)),
                 SaveBtn,
             ))
-            .with_child((Text::new("ДА — сохранить (Enter)"), TextColor(Color::WHITE)));
+            .with_child((
+                Text::new("YES (Enter)"),
+                TextFont { font_size: 11.0, ..default() },
+                TextColor(Color::WHITE),
+            ));
             p.spawn((
                 Button,
                 Node {
-                    padding: UiRect::all(Val::Px(6.0)),
+                    padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                     justify_content: JustifyContent::Center,
                     ..default()
                 },
                 BackgroundColor(Color::srgb(0.6, 0.2, 0.2)),
                 NextBtn,
             ))
-            .with_child((Text::new("НЕТ — следующий (Пробел)"), TextColor(Color::WHITE)));
+            .with_child((
+                Text::new("NO / next (Space)"),
+                TextFont { font_size: 11.0, ..default() },
+                TextColor(Color::WHITE),
+            ));
         });
 }
 
